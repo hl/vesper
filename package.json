@@ -1,0 +1,19 @@
+{
+  "name": "vesper",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "diff": "latest",
+    "js-yaml": "latest",
+    "minimatch": "latest",
+    "yargs": "latest"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "latest",
+    "@types/diff": "latest",
+    "@types/js-yaml": "latest",
+    "@types/yargs": "latest",
+    "bun-types": "latest"
+  }
+}

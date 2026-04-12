@@ -1,0 +1,15 @@
+system_prompt: reviewer.md
+token_budget: 100000
+log_denied_calls: false
+
+tools:
+  read:
+    - "**"
+  write:
+    - "docs/reviews/**"
+  delete: []
+  commands: []
+
+completion:
+  watch_file: ~
+  no_progress_limit: 3

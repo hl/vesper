@@ -1,0 +1,19 @@
+system_prompt: planner.md
+token_budget: 100000
+log_denied_calls: false
+
+tools:
+  read:
+    - "docs/**"
+    - "REQUIREMENTS.md"
+    - "AGENTS.md"
+    - "README.md"
+  write:
+    - "docs/plans/**"
+  delete:
+    - "docs/plans/spec-queue.md"
+  commands: []
+
+completion:
+  watch_file: "docs/plans/spec-queue.md"
+  no_progress_limit: 3

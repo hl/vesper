@@ -1,0 +1,21 @@
+system_prompt: builder.md
+token_budget: 100000
+log_denied_calls: false
+
+tools:
+  read:
+    - "**"
+  write:
+    - "src/**"
+    - "test/**"
+    - "config/**"
+  delete:
+    - "src/**"
+    - "test/**"
+    - "docs/plans/task-queue.md"
+  commands:
+    - "git commit"
+
+completion:
+  watch_file: "docs/plans/task-queue.md"
+  no_progress_limit: 3
