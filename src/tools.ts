@@ -79,22 +79,31 @@ export async function runCommand(
   args: string[],
   cwd: string,
 ): Promise<{ stdout: string; stderr: string; exit_code: number }> {
-  const proc = Bun.spawn([command, ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  try {
+    const proc = Bun.spawn([command, ...args], {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
 
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
 
-  await proc.exited;
+    await proc.exited;
 
-  return {
-    stdout,
-    stderr,
-    exit_code: proc.exitCode ?? 1,
-  };
+    return {
+      stdout,
+      stderr,
+      exit_code: proc.exitCode ?? 1,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      stdout: "",
+      stderr: message,
+      exit_code: 127,
+    };
+  }
 }

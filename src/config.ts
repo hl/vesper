@@ -85,7 +85,15 @@ function assertStringArray(
 }
 
 export function loadConfig(configPath: string): AgentConfig {
-  const raw = readFileSync(configPath, "utf-8");
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, "utf-8");
+  } catch (err) {
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+      throw new VesperError(`Config file not found: ${configPath}`, 1);
+    }
+    throw err;
+  }
   const parsed = yamlLoad(raw);
 
   if (!isPlainObject(parsed)) {
@@ -107,6 +115,12 @@ export function loadConfig(configPath: string): AgentConfig {
   if (!("token_budget" in parsed) || typeof parsed.token_budget !== "number") {
     throw new VesperError(
       `Missing or invalid required key "token_budget" in ${configPath}`,
+      1,
+    );
+  }
+  if (parsed.token_budget <= 0) {
+    throw new VesperError(
+      `"token_budget" must be a positive number in ${configPath}`,
       1,
     );
   }

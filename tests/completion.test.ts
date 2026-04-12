@@ -92,6 +92,20 @@ describe("CompletionTracker", () => {
     expect(await tracker.check()).toBe("continue");
   });
 
+  it("returns no_progress with noProgressLimit 1 on second unchanged check", async () => {
+    const watchFile = "todo.md";
+    const filePath = join(tempDir, watchFile);
+    await Bun.write(filePath, "- task 1\n");
+
+    const tracker = new CompletionTracker(watchFile, 1, tempDir);
+
+    // First check establishes baseline
+    expect(await tracker.check()).toBe("continue");
+
+    // Second check with unchanged content — noProgressCount hits limit of 1
+    expect(await tracker.check()).toBe("no_progress");
+  });
+
   it("resets no-progress counter when line count changes", async () => {
     const watchFile = "todo.md";
     const filePath = join(tempDir, watchFile);

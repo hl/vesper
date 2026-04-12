@@ -45,6 +45,14 @@ describe("listFiles", () => {
     const result = await listFiles(join(tempDir, "no-such-dir"));
     expect(result).toEqual({ error: "not_found" });
   });
+
+  it("returns not_found when called on a regular file", async () => {
+    const filePath = join(tempDir, "regular-file.txt");
+    await fsWriteFile(filePath, "content");
+
+    const result = await listFiles(filePath);
+    expect(result).toEqual({ error: "not_found" });
+  });
 });
 
 describe("writeFile", () => {
@@ -112,10 +120,40 @@ describe("patchFile", () => {
     expect("error" in result).toBe(true);
     if ("error" in result) {
       expect(result.error).toBe("patch_failed");
+      expect("detail" in result && typeof result.detail === "string" && result.detail.length > 0).toBe(true);
     }
 
     const content = await fsReadFile(filePath, "utf-8");
     expect(content).toBe(originalContent);
+  });
+
+  it("applies a multi-hunk diff correctly", async () => {
+    const filePath = join(tempDir, "multi.txt");
+    await fsWriteFile(
+      filePath,
+      "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n",
+    );
+
+    const patch = [
+      "--- a/multi.txt",
+      "+++ b/multi.txt",
+      "@@ -1,3 +1,3 @@",
+      "-line 1",
+      "+LINE ONE",
+      " line 2",
+      " line 3",
+      "@@ -5,2 +5,2 @@",
+      "-line 5",
+      "+LINE FIVE",
+      " line 6",
+      "",
+    ].join("\n");
+
+    const result = await patchFile(filePath, patch);
+    expect(result).toEqual({ ok: true });
+
+    const content = await fsReadFile(filePath, "utf-8");
+    expect(content).toBe("LINE ONE\nline 2\nline 3\nline 4\nLINE FIVE\nline 6\n");
   });
 
   it("returns not_found for a missing file", async () => {
@@ -153,5 +191,11 @@ describe("runCommand", () => {
     const result = await runCommand("sh", ["-c", "echo err >&2; exit 42"], tempDir);
     expect(result.stderr.trim()).toBe("err");
     expect(result.exit_code).toBe(42);
+  });
+
+  it("returns exit_code 127 and non-empty stderr for a non-existent binary", async () => {
+    const result = await runCommand("nonexistent_binary_xyz", [], tempDir);
+    expect(result.exit_code).toBe(127);
+    expect(result.stderr.length).toBeGreaterThan(0);
   });
 });

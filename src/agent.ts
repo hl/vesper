@@ -123,7 +123,7 @@ function getPermissionList(
   }
 }
 
-async function executeTool(
+export async function executeTool(
   toolName: string,
   input: unknown,
   cwd: string,
@@ -192,14 +192,20 @@ export interface RunAgentResult {
   exitCode: number;
 }
 
+/** Minimal interface for the Anthropic messages API, enabling test stubs. */
+export interface MessageClient {
+  create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message>;
+}
+
 export async function runAgent(
   config: AgentConfig,
   systemPrompt: string,
   taskPrompt: string,
   cwd: string,
   agentName: string,
+  client?: MessageClient,
 ): Promise<RunAgentResult> {
-  const client = new Anthropic();
+  const messagesClient: MessageClient = client ?? new Anthropic().messages;
   const tracker = new CompletionTracker(
     config.completion.watch_file,
     config.completion.no_progress_limit,
@@ -222,7 +228,7 @@ export async function runAgent(
     while (true) {
       let response: Anthropic.Message;
       try {
-        response = await client.messages.create({
+        response = await messagesClient.create({
           model: MODEL,
           max_tokens: MAX_OUTPUT_TOKENS,
           system: systemPrompt,

@@ -333,4 +333,124 @@ completion: {}
       expect((e as VesperError).message).toContain("token_budget");
     }
   });
+
+  it("exits with code 1 when tools.read contains non-strings", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools:
+  read:
+    - 1
+    - 2
+    - 3
+completion: {}
+`;
+    const path = writeYaml("bad-read.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("tools.read");
+    }
+  });
+
+  it("exits with code 1 when completion.no_progress_limit is not a number", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools: {}
+completion:
+  no_progress_limit: "five"
+`;
+    const path = writeYaml("bad-npl.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("no_progress_limit");
+    }
+  });
+
+  it("exits with code 1 when completion.watch_file is not a string", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools: {}
+completion:
+  watch_file: 42
+`;
+    const path = writeYaml("bad-wf.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("watch_file");
+    }
+  });
+
+  it("exits with code 1 when token_budget is zero", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 0
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("zero-budget.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("token_budget");
+    }
+  });
+
+  it("exits with code 1 when token_budget is negative", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: -100
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("negative-budget.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("token_budget");
+    }
+  });
+
+  it("exits with code 1 when config file does not exist", () => {
+    const path = join(tempDir, "nonexistent.yml");
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("not found");
+    }
+  });
 });
