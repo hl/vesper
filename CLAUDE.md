@@ -81,4 +81,5 @@ Core flow through source:
 | Agent definitions | `.vesper/` (`<name>.yml` + `<name>.md`) |
 | Planning docs | `docs/plans/` |
 | Requirements / brainstorms | `docs/brainstorms/` |
+| Documented solutions | `docs/solutions/` (best practices, patterns, past fixes — YAML frontmatter searchable by `module`, `tags`, `problem_type`) |
 | Example full config | `.vesper/builder.yml` |
