@@ -28,11 +28,11 @@ async function main(): Promise<void> {
 
   // Resolve and load config
   let configPath: string;
-  let configDir: string;
+  let vesperDir: string;
   try {
     const resolved = resolveAgent(agentName, cwd);
     configPath = resolved.configPath;
-    configDir = resolved.configDir;
+    vesperDir = resolved.vesperDir;
   } catch (err) {
     if (err instanceof VesperError) {
       exitWithError(err.message, err.code);
@@ -59,10 +59,10 @@ async function main(): Promise<void> {
     exitWithError(`Stale signal file found: ${stale}. Clean up signal files before re-running.`);
   }
 
-  // Read system prompt from the path specified in the YAML config
-  const systemPromptFile = Bun.file(`${configDir}/${config.system_prompt}`);
+  // Read system prompt — path in YAML is relative to vesperDir (.vesper/ or ~/.config/vesper/)
+  const systemPromptFile = Bun.file(`${vesperDir}/${config.system_prompt}`);
   if (!(await systemPromptFile.exists())) {
-    exitWithError(`System prompt file not found: ${configDir}/${config.system_prompt}`);
+    exitWithError(`System prompt file not found: ${vesperDir}/${config.system_prompt}`);
   }
   const systemPrompt = await systemPromptFile.text();
 

@@ -22,72 +22,58 @@ describe("resolveAgent", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("resolves agent files from cwd/.vesper/ when both .yml and .md exist", () => {
+  it("resolves agent from cwd/.vesper/agents/ when .yml exists", () => {
     mkdirSync(cwdVesper, { recursive: true });
-    writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: prompt.md\n");
-    writeFileSync(join(cwdVesper, "myagent.md"), "# Prompt\n");
+    writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: system_prompts/myagent.md\n");
 
     const result = resolveAgent("myagent", join(tempDir, "project"), fakeHome);
 
     expect(result.configPath).toBe(join(cwdVesper, "myagent.yml"));
-    expect(result.promptPath).toBe(join(cwdVesper, "myagent.md"));
-    expect(result.configDir).toBe(cwdVesper);
+    expect(result.vesperDir).toBe(join(tempDir, "project", ".vesper"));
   });
 
-  it("falls back to ~/.config/vesper/ when not present in cwd", () => {
-    mkdirSync(homeVesper, { recursive: true });
-    writeFileSync(join(homeVesper, "myagent.yml"), "system_prompt: prompt.md\n");
-    writeFileSync(join(homeVesper, "myagent.md"), "# Prompt\n");
+  it("does not require co-located .md file", () => {
+    mkdirSync(cwdVesper, { recursive: true });
+    writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: system_prompts/myagent.md\n");
+    // No .md file alongside .yml — should still resolve
+
+    const result = resolveAgent("myagent", join(tempDir, "project"), fakeHome);
+    expect(result.configPath).toBe(join(cwdVesper, "myagent.yml"));
+  });
+
+  it("ignores co-located .md file when present", () => {
+    mkdirSync(cwdVesper, { recursive: true });
+    writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: system_prompts/myagent.md\n");
+    writeFileSync(join(cwdVesper, "myagent.md"), "# Legacy prompt\n");
+
+    const result = resolveAgent("myagent", join(tempDir, "project"), fakeHome);
+    expect(result.configPath).toBe(join(cwdVesper, "myagent.yml"));
+    expect(result.vesperDir).toBe(join(tempDir, "project", ".vesper"));
+  });
+
+  it("falls back to ~/.config/vesper/agents/ when not present in cwd", () => {
+    const homeAgents = join(homeVesper, "agents");
+    mkdirSync(homeAgents, { recursive: true });
+    writeFileSync(join(homeAgents, "myagent.yml"), "system_prompt: system_prompts/myagent.md\n");
 
     const result = resolveAgent("myagent", join(tempDir, "project"), fakeHome);
 
-    expect(result.configPath).toBe(join(homeVesper, "myagent.yml"));
-    expect(result.promptPath).toBe(join(homeVesper, "myagent.md"));
-    expect(result.configDir).toBe(homeVesper);
+    expect(result.configPath).toBe(join(homeAgents, "myagent.yml"));
+    expect(result.vesperDir).toBe(homeVesper);
   });
 
-  it("prefers cwd/.vesper/ over ~/.config/vesper/ when both have files", () => {
+  it("prefers cwd/.vesper/ over ~/.config/vesper/ when both have the agent", () => {
     mkdirSync(cwdVesper, { recursive: true });
-    writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: prompt.md\n");
-    writeFileSync(join(cwdVesper, "myagent.md"), "# CWD Prompt\n");
+    writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: system_prompts/myagent.md\n");
 
-    mkdirSync(homeVesper, { recursive: true });
-    writeFileSync(join(homeVesper, "myagent.yml"), "system_prompt: prompt.md\n");
-    writeFileSync(join(homeVesper, "myagent.md"), "# Home Prompt\n");
+    const homeAgents = join(homeVesper, "agents");
+    mkdirSync(homeAgents, { recursive: true });
+    writeFileSync(join(homeAgents, "myagent.yml"), "system_prompt: system_prompts/myagent.md\n");
 
     const result = resolveAgent("myagent", join(tempDir, "project"), fakeHome);
 
     expect(result.configPath).toBe(join(cwdVesper, "myagent.yml"));
-  });
-
-  it("exits with code 1 when .yml exists but .md is missing in cwd", () => {
-    mkdirSync(cwdVesper, { recursive: true });
-    writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: prompt.md\n");
-
-    expect(() => resolveAgent("myagent", join(tempDir, "project"), fakeHome)).toThrow(VesperError);
-
-    try {
-      resolveAgent("myagent", join(tempDir, "project"), fakeHome);
-    } catch (e) {
-      expect(e).toBeInstanceOf(VesperError);
-      expect((e as VesperError).code).toBe(1);
-      expect((e as VesperError).message).toContain("myagent.md");
-    }
-  });
-
-  it("exits with code 1 when .md exists but .yml is missing in cwd", () => {
-    mkdirSync(cwdVesper, { recursive: true });
-    writeFileSync(join(cwdVesper, "myagent.md"), "# Prompt\n");
-
-    expect(() => resolveAgent("myagent", join(tempDir, "project"), fakeHome)).toThrow(VesperError);
-
-    try {
-      resolveAgent("myagent", join(tempDir, "project"), fakeHome);
-    } catch (e) {
-      expect(e).toBeInstanceOf(VesperError);
-      expect((e as VesperError).code).toBe(1);
-      expect((e as VesperError).message).toContain("myagent.yml");
-    }
+    expect(result.vesperDir).toBe(join(tempDir, "project", ".vesper"));
   });
 
   it("exits with code 1 when agent is not found in any location", () => {
@@ -104,11 +90,10 @@ describe("resolveAgent", () => {
     }
   });
 
-  it("shows migration hint when agent exists at old .vesper/ path", () => {
+  it("shows migration hint when agent .yml exists at old .vesper/ path", () => {
     const oldDir = join(tempDir, "project", ".vesper");
     mkdirSync(oldDir, { recursive: true });
     writeFileSync(join(oldDir, "myagent.yml"), "system_prompt: prompt.md\n");
-    writeFileSync(join(oldDir, "myagent.md"), "# Prompt\n");
 
     try {
       resolveAgent("myagent", join(tempDir, "project"), fakeHome);

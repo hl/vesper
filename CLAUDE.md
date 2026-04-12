@@ -66,7 +66,7 @@ Core flow through source:
 
 ## Gotchas
 
-1. Agent definitions are `.yml` + `.md` pairs — both files must exist or resolution fails
+1. Agent definitions are `.yml` files in `.vesper/agents/`. The `system_prompt` path in the YAML is resolved relative to `.vesper/` (the Vesper root), not the agents directory
 2. Path permissions are checked against the **real** (symlink-resolved) path, not the lexical path
 3. Command permissions match binary name only, or binary + first arg — no deeper arg matching
 4. `max_tokens` truncation (stop_reason `"max_tokens"`) is a hard error, not a retry
@@ -78,7 +78,8 @@ Core flow through source:
 
 | Resource | Location |
 |----------|----------|
-| Agent definitions | `.vesper/agents/` (`<name>.yml` + `<name>.md`) |
+| Agent configs | `.vesper/agents/` (`<name>.yml`) |
+| System prompts | `.vesper/system_prompts/` (referenced by `system_prompt` field in agent YAML) |
 | Planning docs | `docs/plans/` |
 | Requirements / brainstorms | `docs/brainstorms/` |
 | Documented solutions | `docs/solutions/` (best practices, patterns, past fixes — YAML frontmatter searchable by `module`, `tags`, `problem_type`) |
