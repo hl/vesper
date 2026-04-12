@@ -199,7 +199,7 @@ export function loadConfig(configPath: string): AgentConfig {
     log_denied_calls: typeof parsed.log_denied_calls === "boolean"
       ? parsed.log_denied_calls
       : false,
-    model: model as string | undefined,
+    model: typeof model === "string" ? model : undefined,
     reveal_permissions: typeof parsed.reveal_permissions === "boolean"
       ? parsed.reveal_permissions
       : false,

@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { resolve, join } from "node:path";
+import { resolve, sep } from "node:path";
+import { realpathSync } from "node:fs";
 import type { AgentConfig } from "./config.js";
 import { CompletionTracker } from "./completion.js";
 import { checkPathPermission, checkCommandPermission, logDeniedCall } from "./permissions.js";
@@ -260,6 +261,7 @@ export async function runAgent(
 
   // R3: Filter tools to match permissions; R2: cache_control applied inside filterTools
   const tools = filterTools(config);
+  const toolsParam = tools.length > 0 ? tools : undefined;
 
   // R2: System prompt as structured content block with cache_control
   const systemBlocks: Anthropic.TextBlockParam[] = [
@@ -279,12 +281,20 @@ export async function runAgent(
     // R9: Inject scratchpad contents before task prompt if configured
     let userContent = taskPrompt;
     if (config.scratchpad !== null) {
-      const scratchpadPath = join(cwd, config.scratchpad);
-      const scratchpadFile = Bun.file(scratchpadPath);
-      if (await scratchpadFile.exists()) {
-        const scratchpadContent = await scratchpadFile.text();
-        if (scratchpadContent.trim().length > 0) {
-          userContent = `[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
+      const scratchpadPath = resolve(cwd, config.scratchpad);
+      // Containment check — scratchpad must be inside cwd
+      let realCwd: string;
+      try { realCwd = realpathSync(cwd); } catch { realCwd = cwd; }
+      const normalizedCwd = realCwd.endsWith(sep) ? realCwd : realCwd + sep;
+      let realScratchpad: string | null;
+      try { realScratchpad = realpathSync(scratchpadPath); } catch { realScratchpad = null; }
+      if (realScratchpad !== null && (realScratchpad === realCwd || realScratchpad.startsWith(normalizedCwd))) {
+        const scratchpadFile = Bun.file(realScratchpad);
+        if (await scratchpadFile.exists()) {
+          const scratchpadContent = await scratchpadFile.text();
+          if (scratchpadContent.trim().length > 0) {
+            userContent = `[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
+          }
         }
       }
     }
@@ -302,7 +312,7 @@ export async function runAgent(
           model,
           max_tokens: MAX_OUTPUT_TOKENS,
           system: systemBlocks,
-          tools,
+          tools: toolsParam,
           messages,
         });
       } catch (err) {
@@ -318,14 +328,7 @@ export async function runAgent(
       totalOutputTokens += response.usage.output_tokens;
       logger.apiCall(model, response.usage.input_tokens, response.usage.output_tokens, callLatency);
 
-      // Check token budget after each API call
-      if (totalInputTokens + totalOutputTokens >= config.token_budget) {
-        await writeNeedsApproval(cwd, agentName, config.token_budget, totalInputTokens, totalOutputTokens);
-        logger.signalWrite("needs_approval", signalPaths.needsApproval);
-        return { exitCode: 0 };
-      }
-
-      // R12: Treat max_tokens truncation as an error
+      // R12: Treat max_tokens truncation as a hard error (checked before budget)
       if (response.stop_reason === "max_tokens") {
         await writeFailed(
           cwd,
@@ -335,6 +338,13 @@ export async function runAgent(
         );
         logger.signalWrite("failed", signalPaths.failed);
         return { exitCode: 1 };
+      }
+
+      // Check token budget after each API call
+      if (totalInputTokens + totalOutputTokens >= config.token_budget) {
+        await writeNeedsApproval(cwd, agentName, config.token_budget, totalInputTokens, totalOutputTokens);
+        logger.signalWrite("needs_approval", signalPaths.needsApproval);
+        return { exitCode: 0 };
       }
 
       // If no tool use, iteration is complete
