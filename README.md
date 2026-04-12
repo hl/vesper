@@ -38,7 +38,14 @@ log_denied_calls: false
 log_events: false
 reveal_permissions: false
 command_timeout: 30                # seconds, default: 30
+command_env: []                    # extra env vars for commands, default: []
+max_tool_result_size: 102400       # bytes, default: 100KB
 scratchpad: docs/plans/.scratchpad-builder.md  # optional
+
+signals:
+  complete: ".vesper-complete"
+  needs_approval: ".vesper-needs-approval"
+  failed: ".vesper-failed"
 
 tools:
   read:
@@ -93,13 +100,40 @@ All permissions are allow-lists enforced by the runtime before any tool result r
 
 ## Signal Files
 
-Signal files communicate status to the caller. Names are set via environment variables:
+Signal files communicate status to the caller. Names are configured in the agent YAML:
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `VESPER_SIGNAL_COMPLETE` | `.vesper-complete` | Clean completion |
-| `VESPER_SIGNAL_NEEDS_APPROVAL` | `.vesper-needs-approval` | Token budget exhausted |
-| `VESPER_SIGNAL_FAILED` | `.vesper-failed` | Error or no progress |
+```yaml
+signals:
+  complete: ".vesper-complete"        # default
+  needs_approval: ".vesper-needs-approval"  # default
+  failed: ".vesper-failed"            # default
+```
+
+| Signal | Default | Purpose |
+|--------|---------|---------|
+| `complete` | `.vesper-complete` | Clean completion (empty file) |
+| `needs_approval` | `.vesper-needs-approval` | Token budget exhausted (JSON) |
+| `failed` | `.vesper-failed` | Error or no progress (JSON) |
+
+**Stale signal check:** The binary refuses to start (exit 1) if any signal file from a prior run still exists. The caller is responsible for cleaning up signal files between runs.
+
+## Command Environment
+
+By default, `run_command` passes only `PATH`, `HOME`, `USER`, `LANG`, `TERM`, and `TMPDIR` to child processes. Use `command_env` to pass additional env vars:
+
+```yaml
+command_env: ["DATABASE_URL", "NODE_ENV"]
+```
+
+This prevents accidental secret exfiltration (e.g., `ANTHROPIC_API_KEY`) via command output.
+
+## Tool Result Truncation
+
+Tool results exceeding `max_tool_result_size` (default 100KB) are truncated with a notice appended. Configurable per agent:
+
+```yaml
+max_tool_result_size: 204800  # 200KB
+```
 
 ## Observability
 

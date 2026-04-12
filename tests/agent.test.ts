@@ -19,7 +19,14 @@ function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
     reveal_permissions: overrides?.reveal_permissions ?? false,
     log_events: overrides?.log_events ?? false,
     command_timeout: overrides?.command_timeout ?? 30,
+    command_env: overrides?.command_env ?? [],
+    max_tool_result_size: overrides?.max_tool_result_size ?? 102400,
     scratchpad: overrides?.scratchpad ?? null,
+    signals: overrides?.signals ?? {
+      complete: ".vesper-complete",
+      needs_approval: ".vesper-needs-approval",
+      failed: ".vesper-failed",
+    },
     tools: {
       read: ["**"],
       write: ["**"],
@@ -92,29 +99,11 @@ function makeToolUseBlock(
 
 let tempDir: string;
 
-const envVars = [
-  "VESPER_SIGNAL_COMPLETE",
-  "VESPER_SIGNAL_NEEDS_APPROVAL",
-  "VESPER_SIGNAL_FAILED",
-] as const;
-const savedEnv: Record<string, string | undefined> = {};
-
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), "vesper-agent-"));
-  for (const key of envVars) {
-    savedEnv[key] = process.env[key];
-    delete process.env[key];
-  }
 });
 
 afterEach(() => {
-  for (const key of envVars) {
-    if (savedEnv[key] !== undefined) {
-      process.env[key] = savedEnv[key];
-    } else {
-      delete process.env[key];
-    }
-  }
   rmSync(tempDir, { recursive: true, force: true });
 });
 

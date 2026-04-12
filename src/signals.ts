@@ -1,5 +1,6 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import type { SignalConfig } from "./config.js";
 import { VesperError } from "./errors.js";
 
 function resolveSignalPath(cwd: string, name: string): string {
@@ -23,31 +24,32 @@ export interface SignalPaths {
   failed: string;
 }
 
-export function getSignalPaths(cwd: string): SignalPaths {
-  const complete = process.env.VESPER_SIGNAL_COMPLETE ?? ".vesper-complete";
-  const needsApproval = process.env.VESPER_SIGNAL_NEEDS_APPROVAL ?? ".vesper-needs-approval";
-  const failed = process.env.VESPER_SIGNAL_FAILED ?? ".vesper-failed";
-
+export function getSignalPaths(cwd: string, signals: SignalConfig): SignalPaths {
   return {
-    complete: resolveSignalPath(cwd, complete),
-    needsApproval: resolveSignalPath(cwd, needsApproval),
-    failed: resolveSignalPath(cwd, failed),
+    complete: resolveSignalPath(cwd, signals.complete),
+    needsApproval: resolveSignalPath(cwd, signals.needs_approval),
+    failed: resolveSignalPath(cwd, signals.failed),
   };
 }
 
-export async function writeComplete(cwd: string): Promise<void> {
-  const paths = getSignalPaths(cwd);
+export function checkStaleSignals(paths: SignalPaths): string | null {
+  if (existsSync(paths.complete)) return paths.complete;
+  if (existsSync(paths.needsApproval)) return paths.needsApproval;
+  if (existsSync(paths.failed)) return paths.failed;
+  return null;
+}
+
+export async function writeComplete(paths: SignalPaths): Promise<void> {
   await Bun.write(paths.complete, "");
 }
 
 export async function writeNeedsApproval(
-  cwd: string,
+  paths: SignalPaths,
   agent: string,
   budget: number,
   inputTokens: number,
   outputTokens: number,
 ): Promise<void> {
-  const paths = getSignalPaths(cwd);
   const payload = {
     reason: "token_budget_exceeded",
     agent,
@@ -57,12 +59,11 @@ export async function writeNeedsApproval(
 }
 
 export async function writeFailed(
-  cwd: string,
+  paths: SignalPaths,
   agent: string,
   reason: "no_progress" | "error",
   message: string,
 ): Promise<void> {
-  const paths = getSignalPaths(cwd);
   const payload = { reason, agent, message };
   await Bun.write(paths.failed, JSON.stringify(payload, null, 2));
 }

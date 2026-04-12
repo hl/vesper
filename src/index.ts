@@ -4,7 +4,7 @@ import { runAgent } from "./agent.js";
 import { CompletionTracker } from "./completion.js";
 import { type AgentConfig, loadConfig, resolveAgent } from "./config.js";
 import { exitWithError, VesperError } from "./errors.js";
-import { writeComplete, writeFailed } from "./signals.js";
+import { checkStaleSignals, getSignalPaths, writeComplete, writeFailed } from "./signals.js";
 
 async function main(): Promise<void> {
   const argv = await yargs(hideBin(process.argv))
@@ -50,6 +50,15 @@ async function main(): Promise<void> {
     throw err;
   }
 
+  // Resolve signal paths from config
+  const signalPaths = getSignalPaths(cwd, config.signals);
+
+  // Check for stale signal files — exit 1 if any exist (R4)
+  const stale = checkStaleSignals(signalPaths);
+  if (stale !== null) {
+    exitWithError(`Stale signal file found: ${stale}. Clean up signal files before re-running.`);
+  }
+
   // Read system prompt from the path specified in the YAML config
   const systemPromptFile = Bun.file(`${configDir}/${config.system_prompt}`);
   if (!(await systemPromptFile.exists())) {
@@ -67,7 +76,7 @@ async function main(): Promise<void> {
     );
     const status = await tracker.check();
     if (status === "complete") {
-      await writeComplete(cwd);
+      await writeComplete(signalPaths);
       process.exit(0);
     }
   }
@@ -84,7 +93,7 @@ async function main(): Promise<void> {
     process.exit(result.exitCode);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await writeFailed(cwd, agentName, "error", `Unexpected error: ${message}`);
+    await writeFailed(signalPaths, agentName, "error", `Unexpected error: ${message}`);
     process.exit(1);
   }
 }

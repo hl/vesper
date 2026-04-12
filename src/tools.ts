@@ -2,23 +2,50 @@ import { mkdir, readdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { applyPatch } from "diff";
 
+const DEFAULT_ENV_KEYS = ["PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR"];
+
+export function truncateResult(content: string, limit: number): string {
+  const bytes = Buffer.byteLength(content, "utf-8");
+  if (bytes <= limit) return content;
+  // Truncate by slicing the buffer to avoid splitting multi-byte chars
+  const truncated = Buffer.from(content, "utf-8").subarray(0, limit).toString("utf-8");
+  return `${truncated}\n[truncated: showing first ${limit} bytes of ${bytes} bytes]`;
+}
+
 export async function readFile(
   resolvedPath: string,
+  maxResultSize = 102400,
 ): Promise<{ content: string } | { error: "not_found" }> {
   const file = Bun.file(resolvedPath);
   if (!(await file.exists())) {
     return { error: "not_found" };
   }
   const content = await file.text();
-  return { content };
+  return { content: truncateResult(content, maxResultSize) };
 }
 
 export async function listFiles(
   resolvedPath: string,
-): Promise<{ entries: string[] } | { error: "not_found" }> {
+  maxResultSize = 102400,
+): Promise<
+  { entries: string[]; truncated?: boolean; total_entries?: number } | { error: "not_found" }
+> {
   try {
     const entries = await readdir(resolvedPath);
-    return { entries };
+    const serialized = JSON.stringify(entries);
+    if (Buffer.byteLength(serialized, "utf-8") <= maxResultSize) {
+      return { entries };
+    }
+    // Truncate by reducing entry count until under limit
+    let count = entries.length;
+    while (count > 0) {
+      count = Math.floor(count / 2);
+      const subset = entries.slice(0, count);
+      if (Buffer.byteLength(JSON.stringify(subset), "utf-8") <= maxResultSize) {
+        return { entries: subset, truncated: true, total_entries: entries.length };
+      }
+    }
+    return { entries: [], truncated: true, total_entries: entries.length };
   } catch (err: unknown) {
     if (
       err instanceof Error &&
@@ -71,17 +98,32 @@ export async function deleteFile(
   }
 }
 
+function buildCommandEnv(extraKeys: string[]): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of [...DEFAULT_ENV_KEYS, ...extraKeys]) {
+    const val = process.env[key];
+    if (val !== undefined) {
+      env[key] = val;
+    }
+  }
+  return env;
+}
+
 export async function runCommand(
   command: string,
   args: string[],
   cwd: string,
   timeoutSeconds = 30,
+  commandEnv: string[] = [],
+  maxResultSize = 102400,
 ): Promise<{ stdout: string; stderr: string; exit_code: number }> {
   try {
+    const env = buildCommandEnv(commandEnv);
     const proc = Bun.spawn([command, ...args], {
       cwd,
       stdout: "pipe",
       stderr: "pipe",
+      env,
     });
 
     let timedOut = false;
@@ -100,15 +142,18 @@ export async function runCommand(
 
     if (timedOut) {
       return {
-        stdout,
-        stderr: `${stderr}\nCommand timed out after ${timeoutSeconds}s`,
+        stdout: truncateResult(stdout, maxResultSize),
+        stderr: truncateResult(
+          `${stderr}\nCommand timed out after ${timeoutSeconds}s`,
+          maxResultSize,
+        ),
         exit_code: 124,
       };
     }
 
     return {
-      stdout,
-      stderr,
+      stdout: truncateResult(stdout, maxResultSize),
+      stderr: truncateResult(stderr, maxResultSize),
       exit_code: proc.exitCode ?? 1,
     };
   } catch (err) {

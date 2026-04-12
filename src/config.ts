@@ -4,6 +4,12 @@ import { join } from "node:path";
 import { load as yamlLoad } from "js-yaml";
 import { VesperError } from "./errors.js";
 
+export interface SignalConfig {
+  complete: string;
+  needs_approval: string;
+  failed: string;
+}
+
 export interface AgentConfig {
   system_prompt: string;
   token_budget: number;
@@ -12,7 +18,10 @@ export interface AgentConfig {
   reveal_permissions: boolean;
   log_events: boolean;
   command_timeout: number;
+  command_env: string[];
+  max_tool_result_size: number;
   scratchpad: string | null;
+  signals: SignalConfig;
   tools: {
     read: string[];
     write: string[];
@@ -120,7 +129,7 @@ export function loadConfig(configPath: string): AgentConfig {
   assertStringArray(toolDelete, "tools.delete");
   assertStringArray(toolCommands, "tools.commands");
 
-  // Validate completion fields if present
+  // Validate completion fields
   const watchFile = completion.watch_file ?? null;
   if (watchFile !== null && typeof watchFile !== "string") {
     throw new VesperError(`"completion.watch_file" must be a string or null`, 1);
@@ -147,6 +156,41 @@ export function loadConfig(configPath: string): AgentConfig {
     throw new VesperError(`"scratchpad" must be a string or null in ${configPath}`, 1);
   }
 
+  // v0.3: command_env
+  const commandEnv = parsed.command_env ?? [];
+  assertStringArray(commandEnv, "command_env");
+
+  // v0.3: max_tool_result_size
+  const maxToolResultSize = parsed.max_tool_result_size ?? 102400;
+  if (typeof maxToolResultSize !== "number" || maxToolResultSize <= 0) {
+    throw new VesperError(`"max_tool_result_size" must be a positive number in ${configPath}`, 1);
+  }
+
+  // v0.3: signals
+  const signalsRaw = parsed.signals;
+  let signals: SignalConfig;
+  if (signalsRaw === undefined || signalsRaw === null) {
+    signals = {
+      complete: ".vesper-complete",
+      needs_approval: ".vesper-needs-approval",
+      failed: ".vesper-failed",
+    };
+  } else if (isPlainObject(signalsRaw)) {
+    const complete = signalsRaw.complete ?? ".vesper-complete";
+    const needsApproval = signalsRaw.needs_approval ?? ".vesper-needs-approval";
+    const failed = signalsRaw.failed ?? ".vesper-failed";
+    if (
+      typeof complete !== "string" ||
+      typeof needsApproval !== "string" ||
+      typeof failed !== "string"
+    ) {
+      throw new VesperError(`"signals" values must be strings in ${configPath}`, 1);
+    }
+    signals = { complete, needs_approval: needsApproval, failed };
+  } else {
+    throw new VesperError(`"signals" must be a mapping in ${configPath}`, 1);
+  }
+
   return {
     system_prompt: parsed.system_prompt,
     token_budget: parsed.token_budget,
@@ -157,7 +201,10 @@ export function loadConfig(configPath: string): AgentConfig {
       typeof parsed.reveal_permissions === "boolean" ? parsed.reveal_permissions : false,
     log_events: typeof parsed.log_events === "boolean" ? parsed.log_events : false,
     command_timeout: commandTimeout,
+    command_env: commandEnv,
+    max_tool_result_size: maxToolResultSize,
     scratchpad,
+    signals,
     tools: {
       read: toolRead,
       write: toolWrite,

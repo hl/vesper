@@ -1,79 +1,126 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VesperError } from "../src/errors.js";
-import { writeComplete, writeFailed, writeNeedsApproval } from "../src/signals.js";
+import {
+  checkStaleSignals,
+  getSignalPaths,
+  type SignalPaths,
+  writeComplete,
+  writeFailed,
+  writeNeedsApproval,
+} from "../src/signals.js";
 
 describe("signals", () => {
   let tempDir: string;
-
-  const envVars = [
-    "VESPER_SIGNAL_COMPLETE",
-    "VESPER_SIGNAL_NEEDS_APPROVAL",
-    "VESPER_SIGNAL_FAILED",
-  ] as const;
-
-  const savedEnv: Record<string, string | undefined> = {};
+  let realTempDir: string;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "vesper-signals-"));
-    for (const key of envVars) {
-      savedEnv[key] = process.env[key];
-      delete process.env[key];
-    }
+    realTempDir = realpathSync(tempDir);
   });
 
   afterEach(() => {
-    for (const key of envVars) {
-      if (savedEnv[key] !== undefined) {
-        process.env[key] = savedEnv[key];
-      } else {
-        delete process.env[key];
-      }
-    }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  describe("signal path defaults and overrides", () => {
-    it("uses default signal file names when env vars are not set", async () => {
-      await writeComplete(tempDir);
-      expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+  function defaultSignals(): SignalPaths {
+    return getSignalPaths(tempDir, {
+      complete: ".vesper-complete",
+      needs_approval: ".vesper-needs-approval",
+      failed: ".vesper-failed",
+    });
+  }
+
+  describe("getSignalPaths", () => {
+    it("resolves signal paths from config with defaults", () => {
+      const paths = defaultSignals();
+      expect(paths.complete).toBe(join(realTempDir, ".vesper-complete"));
+      expect(paths.needsApproval).toBe(join(realTempDir, ".vesper-needs-approval"));
+      expect(paths.failed).toBe(join(realTempDir, ".vesper-failed"));
     });
 
-    it("reads signal file names from environment variables", async () => {
-      process.env.VESPER_SIGNAL_COMPLETE = "done.sig";
-      await writeComplete(tempDir);
-      expect(existsSync(join(tempDir, "done.sig"))).toBe(true);
+    it("resolves custom signal names from config", () => {
+      const paths = getSignalPaths(tempDir, {
+        complete: "done.sig",
+        needs_approval: "approval.sig",
+        failed: "fail.sig",
+      });
+      expect(paths.complete).toBe(join(realTempDir, "done.sig"));
+      expect(paths.needsApproval).toBe(join(realTempDir, "approval.sig"));
+      expect(paths.failed).toBe(join(realTempDir, "fail.sig"));
     });
 
     it("rejects signal paths that traverse outside cwd", () => {
-      process.env.VESPER_SIGNAL_FAILED = "../../etc/cron.d/backdoor";
-      expect(writeFailed(tempDir, "agent", "error", "fail")).rejects.toThrow(VesperError);
+      expect(() =>
+        getSignalPaths(tempDir, {
+          complete: ".vesper-complete",
+          needs_approval: ".vesper-needs-approval",
+          failed: "../../etc/cron.d/backdoor",
+        }),
+      ).toThrow(VesperError);
     });
 
     it("rejects absolute signal paths", () => {
-      process.env.VESPER_SIGNAL_COMPLETE = "/tmp/evil";
-      expect(writeComplete(tempDir)).rejects.toThrow(VesperError);
+      expect(() =>
+        getSignalPaths(tempDir, {
+          complete: "/tmp/evil",
+          needs_approval: ".vesper-needs-approval",
+          failed: ".vesper-failed",
+        }),
+      ).toThrow(VesperError);
+    });
+  });
+
+  describe("checkStaleSignals", () => {
+    it("returns null when no signal files exist", () => {
+      const paths = defaultSignals();
+      expect(checkStaleSignals(paths)).toBeNull();
+    });
+
+    it("returns path of stale complete signal", () => {
+      const paths = defaultSignals();
+      writeFileSync(paths.complete, "");
+      expect(checkStaleSignals(paths)).toBe(paths.complete);
+    });
+
+    it("returns path of stale failed signal", () => {
+      const paths = defaultSignals();
+      writeFileSync(paths.failed, "{}");
+      expect(checkStaleSignals(paths)).toBe(paths.failed);
+    });
+
+    it("returns path of stale needs-approval signal", () => {
+      const paths = defaultSignals();
+      writeFileSync(paths.needsApproval, "{}");
+      expect(checkStaleSignals(paths)).toBe(paths.needsApproval);
     });
   });
 
   describe("writeComplete", () => {
     it("writes complete signal as an empty file", async () => {
-      await writeComplete(tempDir);
-      const filePath = join(tempDir, ".vesper-complete");
-      expect(existsSync(filePath)).toBe(true);
-      expect(readFileSync(filePath, "utf-8")).toBe("");
+      const paths = defaultSignals();
+      await writeComplete(paths);
+      expect(existsSync(paths.complete)).toBe(true);
+      expect(readFileSync(paths.complete, "utf-8")).toBe("");
     });
   });
 
   describe("writeNeedsApproval", () => {
-    it("writes needs-approval signal as valid JSON with reason, agent, and message fields", async () => {
-      await writeNeedsApproval(tempDir, "coder", 50000, 30000, 25000);
-      const filePath = join(tempDir, ".vesper-needs-approval");
-      expect(existsSync(filePath)).toBe(true);
+    it("writes needs-approval signal as valid JSON with correct fields", async () => {
+      const paths = defaultSignals();
+      await writeNeedsApproval(paths, "coder", 50000, 30000, 25000);
+      expect(existsSync(paths.needsApproval)).toBe(true);
 
-      const content = JSON.parse(readFileSync(filePath, "utf-8"));
+      const content = JSON.parse(readFileSync(paths.needsApproval, "utf-8"));
       expect(content.reason).toBe("token_budget_exceeded");
       expect(content.agent).toBe("coder");
       expect(content.message).toBe(
@@ -83,22 +130,22 @@ describe("signals", () => {
   });
 
   describe("writeFailed", () => {
-    it("writes failed signal as valid JSON with reason, agent, and message fields", async () => {
-      await writeFailed(tempDir, "reviewer", "no_progress", "No changes detected after 3 loops");
-      const filePath = join(tempDir, ".vesper-failed");
-      expect(existsSync(filePath)).toBe(true);
+    it("writes failed signal with no_progress reason", async () => {
+      const paths = defaultSignals();
+      await writeFailed(paths, "reviewer", "no_progress", "No changes detected");
+      expect(existsSync(paths.failed)).toBe(true);
 
-      const content = JSON.parse(readFileSync(filePath, "utf-8"));
+      const content = JSON.parse(readFileSync(paths.failed, "utf-8"));
       expect(content.reason).toBe("no_progress");
       expect(content.agent).toBe("reviewer");
-      expect(content.message).toBe("No changes detected after 3 loops");
+      expect(content.message).toBe("No changes detected");
     });
 
     it("writes failed signal with error reason", async () => {
-      await writeFailed(tempDir, "coder", "error", "API request failed");
-      const filePath = join(tempDir, ".vesper-failed");
+      const paths = defaultSignals();
+      await writeFailed(paths, "coder", "error", "API request failed");
 
-      const content = JSON.parse(readFileSync(filePath, "utf-8"));
+      const content = JSON.parse(readFileSync(paths.failed, "utf-8"));
       expect(content.reason).toBe("error");
       expect(content.agent).toBe("coder");
       expect(content.message).toBe("API request failed");
@@ -106,23 +153,15 @@ describe("signals", () => {
   });
 
   describe("signal file location", () => {
-    it("writes all signal files to cwd, not to process cwd or elsewhere", async () => {
-      await writeComplete(tempDir);
-      await writeNeedsApproval(tempDir, "agent", 1000, 500, 600);
-      await writeFailed(tempDir, "agent", "error", "fail");
+    it("writes all signal files to cwd", async () => {
+      const paths = defaultSignals();
+      await writeComplete(paths);
+      await writeNeedsApproval(paths, "agent", 1000, 500, 600);
+      await writeFailed(paths, "agent", "error", "fail");
 
-      // All files should exist under tempDir
       expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
       expect(existsSync(join(tempDir, ".vesper-needs-approval"))).toBe(true);
       expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(true);
-
-      // None should exist under the actual process cwd
-      const processCwd = process.cwd();
-      if (processCwd !== tempDir) {
-        expect(existsSync(join(processCwd, ".vesper-complete"))).toBe(false);
-        expect(existsSync(join(processCwd, ".vesper-needs-approval"))).toBe(false);
-        expect(existsSync(join(processCwd, ".vesper-failed"))).toBe(false);
-      }
     });
   });
 });

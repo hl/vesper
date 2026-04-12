@@ -4,6 +4,12 @@ log_denied_calls: false
 log_events: false
 command_timeout: 60
 scratchpad: "docs/plans/.scratchpad-builder.md"
+command_env: []
+
+signals:
+  complete: ".vesper-complete"
+  needs_approval: ".vesper-needs-approval"
+  failed: ".vesper-failed"
 
 tools:
   read:

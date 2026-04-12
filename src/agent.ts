@@ -199,9 +199,9 @@ export async function executeTool(
 
     switch (toolName) {
       case "read_file":
-        return JSON.stringify(await readFile(resolvedPath));
+        return JSON.stringify(await readFile(resolvedPath, config.max_tool_result_size));
       case "list_files":
-        return JSON.stringify(await listFiles(resolvedPath));
+        return JSON.stringify(await listFiles(resolvedPath, config.max_tool_result_size));
       case "write_file": {
         const content = validateString(inp, "content");
         if (content === null) return denialResponse(config, toolName, path, perm.list);
@@ -232,7 +232,16 @@ export async function executeTool(
     return denialResponse(config, toolName, `${command} ${args.join(" ")}`, config.tools.commands);
   }
 
-  return JSON.stringify(await runCommand(command, args, cwd, config.command_timeout));
+  return JSON.stringify(
+    await runCommand(
+      command,
+      args,
+      cwd,
+      config.command_timeout,
+      config.command_env,
+      config.max_tool_result_size,
+    ),
+  );
 }
 
 export interface RunAgentResult {
@@ -259,7 +268,7 @@ export async function runAgent(
     cwd,
   );
   const logger = new Logger(config.log_events);
-  const signalPaths = getSignalPaths(cwd);
+  const signalPaths = getSignalPaths(cwd, config.signals);
 
   // R1: Configurable model per agent
   const model = config.model ?? DEFAULT_MODEL;
@@ -331,7 +340,7 @@ export async function runAgent(
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        await writeFailed(cwd, agentName, "error", `API error: ${message}`);
+        await writeFailed(signalPaths, agentName, "error", `API error: ${message}`);
         logger.signalWrite("failed", signalPaths.failed);
         return { exitCode: 1 };
       }
@@ -345,7 +354,7 @@ export async function runAgent(
       // R12: Treat max_tokens truncation as a hard error (checked before budget)
       if (response.stop_reason === "max_tokens") {
         await writeFailed(
-          cwd,
+          signalPaths,
           agentName,
           "error",
           "Response truncated: stop_reason was 'max_tokens'. The model's output exceeded the per-call limit.",
@@ -357,7 +366,7 @@ export async function runAgent(
       // Check token budget after each API call
       if (totalInputTokens + totalOutputTokens >= config.token_budget) {
         await writeNeedsApproval(
-          cwd,
+          signalPaths,
           agentName,
           config.token_budget,
           totalInputTokens,
@@ -412,13 +421,13 @@ export async function runAgent(
     logger.completionCheck(completionStatus);
 
     if (completionStatus === "complete") {
-      await writeComplete(cwd);
+      await writeComplete(signalPaths);
       logger.signalWrite("complete", signalPaths.complete);
       return { exitCode: 0 };
     }
     if (completionStatus === "no_progress") {
       await writeFailed(
-        cwd,
+        signalPaths,
         agentName,
         "no_progress",
         `No progress detected after ${config.completion.no_progress_limit} consecutive iterations.`,
@@ -432,12 +441,12 @@ export async function runAgent(
 
   // Max iterations reached
   if (config.completion.watch_file === null) {
-    await writeComplete(cwd);
+    await writeComplete(signalPaths);
     logger.signalWrite("complete", signalPaths.complete);
     return { exitCode: 0 };
   }
   await writeFailed(
-    cwd,
+    signalPaths,
     agentName,
     "error",
     `Maximum iteration limit (${MAX_ITERATIONS}) reached without completion.`,

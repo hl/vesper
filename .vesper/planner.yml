@@ -4,6 +4,11 @@ log_denied_calls: false
 log_events: false
 scratchpad: "docs/plans/.scratchpad-planner.md"
 
+signals:
+  complete: ".vesper-complete"
+  needs_approval: ".vesper-needs-approval"
+  failed: ".vesper-failed"
+
 tools:
   read:
     - "docs/**"

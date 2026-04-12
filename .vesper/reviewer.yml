@@ -3,6 +3,11 @@ token_budget: 100000
 log_denied_calls: false
 log_events: false
 
+signals:
+  complete: ".vesper-complete"
+  needs_approval: ".vesper-needs-approval"
+  failed: ".vesper-failed"
+
 tools:
   read:
     - "**"
