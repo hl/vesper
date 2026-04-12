@@ -91,7 +91,16 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
 ];
 
-type ToolInput = Record<string, unknown>;
+function validateString(input: Record<string, unknown>, field: string): string | null {
+  const val = input[field];
+  return typeof val === "string" ? val : null;
+}
+
+function validateStringArray(input: Record<string, unknown>, field: string): string[] | null {
+  const val = input[field];
+  if (!Array.isArray(val) || !val.every((v) => typeof v === "string")) return null;
+  return val as string[];
+}
 
 function getPermissionList(
   toolName: string,
@@ -115,7 +124,7 @@ function getPermissionList(
 
 async function executeTool(
   toolName: string,
-  input: ToolInput,
+  input: unknown,
   cwd: string,
   config: AgentConfig,
 ): Promise<string> {
@@ -124,8 +133,13 @@ async function executeTool(
     return JSON.stringify({ error: "permission_denied" });
   }
 
+  const inp = typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {};
+
   if (perm.type === "path") {
-    const path = input.path as string;
+    const path = validateString(inp, "path");
+    if (path === null) {
+      return JSON.stringify({ error: "permission_denied" });
+    }
     if (!checkPathPermission(path, cwd, perm.list)) {
       if (config.log_denied_calls) {
         logDeniedCall(toolName, path);
@@ -140,10 +154,16 @@ async function executeTool(
         return JSON.stringify(await readFile(resolvedPath));
       case "list_files":
         return JSON.stringify(await listFiles(resolvedPath));
-      case "write_file":
-        return JSON.stringify(await writeFile(resolvedPath, input.content as string));
-      case "patch_file":
-        return JSON.stringify(await patchFile(resolvedPath, input.patch as string));
+      case "write_file": {
+        const content = validateString(inp, "content");
+        if (content === null) return JSON.stringify({ error: "permission_denied" });
+        return JSON.stringify(await writeFile(resolvedPath, content));
+      }
+      case "patch_file": {
+        const patch = validateString(inp, "patch");
+        if (patch === null) return JSON.stringify({ error: "permission_denied" });
+        return JSON.stringify(await patchFile(resolvedPath, patch));
+      }
       case "delete_file":
         return JSON.stringify(await deleteFile(resolvedPath));
       default:
@@ -152,8 +172,11 @@ async function executeTool(
   }
 
   // Command
-  const command = input.command as string;
-  const args = (input.args as string[]) ?? [];
+  const command = validateString(inp, "command");
+  const args = validateStringArray(inp, "args") ?? [];
+  if (command === null) {
+    return JSON.stringify({ error: "permission_denied" });
+  }
   if (!checkCommandPermission(command, args, config.tools.commands)) {
     if (config.log_denied_calls) {
       logDeniedCall(toolName, `${command} ${args.join(" ")}`);
@@ -185,9 +208,9 @@ export async function runAgent(
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
 
-  // Iteration loop
+  // Iteration loop — each iteration is a fresh API conversation.
+  // Context does not accumulate across iterations (by design).
   while (true) {
-    // Each iteration starts with a fresh message array
     let messages: Anthropic.MessageParam[] = [
       { role: "user", content: taskPrompt },
     ];
@@ -209,9 +232,15 @@ export async function runAgent(
         return { exitCode: 1 };
       }
 
-      // Track usage
+      // Track usage after each API call
       totalInputTokens += response.usage.input_tokens;
       totalOutputTokens += response.usage.output_tokens;
+
+      // Check token budget after each API call (not just after iteration)
+      if (totalInputTokens + totalOutputTokens >= config.token_budget) {
+        await writeNeedsApproval(cwd, agentName, config.token_budget, totalInputTokens, totalOutputTokens);
+        return { exitCode: 0 };
+      }
 
       // If no tool use, iteration is complete
       if (response.stop_reason !== "tool_use") {
@@ -227,7 +256,7 @@ export async function runAgent(
       for (const toolUse of toolUseBlocks) {
         const result = await executeTool(
           toolUse.name,
-          toolUse.input as ToolInput,
+          toolUse.input,
           cwd,
           config,
         );
@@ -244,12 +273,6 @@ export async function runAgent(
         { role: "assistant", content: response.content },
         { role: "user", content: toolResults },
       ];
-    }
-
-    // Check token budget after iteration
-    if (totalInputTokens + totalOutputTokens >= config.token_budget) {
-      await writeNeedsApproval(cwd, agentName, config.token_budget, totalInputTokens, totalOutputTokens);
-      return { exitCode: 0 };
     }
 
     // Check completion condition

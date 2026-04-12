@@ -1,6 +1,5 @@
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { join } from "node:path";
 import { type AgentConfig, resolveAgent, loadConfig } from "./config.js";
 import { runAgent } from "./agent.js";
 import { CompletionTracker } from "./completion.js";
@@ -51,11 +50,10 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  // Read system prompt
-  const systemPromptPath = join(configDir, config.system_prompt);
-  const systemPromptFile = Bun.file(systemPromptPath);
+  // Read system prompt from the path specified in the YAML config
+  const systemPromptFile = Bun.file(`${configDir}/${config.system_prompt}`);
   if (!(await systemPromptFile.exists())) {
-    exitWithError(`System prompt file not found: ${systemPromptPath}`);
+    exitWithError(`System prompt file not found: ${configDir}/${config.system_prompt}`);
   }
   const systemPrompt = await systemPromptFile.text();
 

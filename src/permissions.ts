@@ -1,13 +1,9 @@
 import { resolve, relative, sep } from "node:path";
 import { minimatch } from "minimatch";
 
-export function isInsideCwd(resolvedPath: string, cwd: string): boolean {
+function isInsideCwd(resolvedPath: string, cwd: string): boolean {
   const normalizedCwd = cwd.endsWith(sep) ? cwd : cwd + sep;
   return resolvedPath === cwd || resolvedPath.startsWith(normalizedCwd);
-}
-
-export function resolvePath(inputPath: string, cwd: string): string {
-  return resolve(cwd, inputPath);
 }
 
 export function checkPathPermission(
@@ -15,13 +11,18 @@ export function checkPathPermission(
   cwd: string,
   allowList: string[],
 ): boolean {
-  const resolved = resolvePath(inputPath, cwd);
+  const resolved = resolve(cwd, inputPath);
   if (!isInsideCwd(resolved, cwd)) {
     return false;
   }
   const rel = relative(cwd, resolved);
+  // When the path resolves to cwd itself (e.g., list_files(".")),
+  // relative() returns "". Match against both "" and "." since globs
+  // like "**" match "." but not the empty string.
   if (rel === "") {
-    return allowList.some((pattern) => minimatch(".", pattern));
+    return allowList.some(
+      (pattern) => minimatch(".", pattern) || minimatch("", pattern),
+    );
   }
   return allowList.some((pattern) => minimatch(rel, pattern));
 }
@@ -45,5 +46,6 @@ export function checkCommandPermission(
 }
 
 export function logDeniedCall(toolName: string, target: string): void {
-  process.stderr.write(`[vesper] denied: ${toolName}(${target})\n`);
+  const sanitized = target.replace(/[\r\n]/g, "\\n");
+  process.stderr.write(`[vesper] denied: ${toolName}(${sanitized})\n`);
 }

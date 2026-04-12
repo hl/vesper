@@ -63,7 +63,7 @@ export function resolveAgent(
   }
 
   throw new VesperError(
-    `Agent "${name}" not found in ${locations.map((l) => l).join(" or ")}`,
+    `Agent "${name}" not found in ${locations.join(" or ")}`,
     1,
   );
 }
@@ -165,14 +165,14 @@ export function loadConfig(configPath: string): AgentConfig {
       ? parsed.log_denied_calls
       : false,
     tools: {
-      read: toolRead as string[],
-      write: toolWrite as string[],
-      delete: toolDelete as string[],
-      commands: toolCommands as string[],
+      read: toolRead,
+      write: toolWrite,
+      delete: toolDelete,
+      commands: toolCommands,
     },
     completion: {
-      watch_file: watchFile as string | null,
-      no_progress_limit: noProgressLimit as number,
+      watch_file: watchFile,
+      no_progress_limit: noProgressLimit,
     },
   };
 }

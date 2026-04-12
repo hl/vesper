@@ -2,7 +2,6 @@ import { describe, it, expect } from "bun:test";
 import {
   checkPathPermission,
   checkCommandPermission,
-  isInsideCwd,
 } from "../src/permissions.js";
 
 const cwd = "/project";
@@ -43,23 +42,13 @@ describe("checkPathPermission", () => {
   it("denies when allow list is empty", () => {
     expect(checkPathPermission("src/index.ts", cwd, [])).toBe(false);
   });
-});
 
-describe("isInsideCwd", () => {
-  it("returns true for cwd itself", () => {
-    expect(isInsideCwd("/project", "/project")).toBe(true);
+  it("permits listing cwd root with ** glob", () => {
+    expect(checkPathPermission(".", cwd, ["**"])).toBe(true);
   });
 
-  it("returns true for a path inside cwd", () => {
-    expect(isInsideCwd("/project/src/file.ts", "/project")).toBe(true);
-  });
-
-  it("returns false for a path outside cwd", () => {
-    expect(isInsideCwd("/other/file.ts", "/project")).toBe(false);
-  });
-
-  it("returns false for prefix-tricked path", () => {
-    expect(isInsideCwd("/project-evil/file.ts", "/project")).toBe(false);
+  it("denies listing cwd root when glob does not match", () => {
+    expect(checkPathPermission(".", cwd, ["src/**"])).toBe(false);
   });
 });
 

@@ -20,7 +20,11 @@ export async function listFiles(
     const entries = await readdir(resolvedPath);
     return { entries };
   } catch (err: unknown) {
-    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+    if (
+      err instanceof Error &&
+      "code" in err &&
+      (err.code === "ENOENT" || err.code === "ENOTDIR")
+    ) {
       return { error: "not_found" };
     }
     throw err;
