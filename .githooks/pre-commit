@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Skip quality gates if no code files are staged
+staged_code=$(git diff --cached --name-only -- 'src/**' 'tests/**' '*.ts' 'biome.json' 'tsconfig.json' 'package.json')
+if [ -z "$staged_code" ]; then
+  echo "==> No code changes staged, skipping quality gates."
+  exit 0
+fi
+
 echo "==> Running quality gates..."
 
 echo "--- Typecheck"
