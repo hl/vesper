@@ -1,0 +1,91 @@
+import { describe, it, expect } from "bun:test";
+import { Logger } from "../src/logger.js";
+
+describe("Logger", () => {
+  it("emits JSONL to stderr when enabled", () => {
+    const logger = new Logger(true);
+
+    let captured = "";
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      return true;
+    };
+
+    logger.iterationStart(1);
+    logger.apiCall("claude-sonnet-4-20250514", 100, 200, 350);
+    logger.toolCall("read", "src/main.ts", true, 12);
+    logger.completionCheck("in_progress");
+    logger.signalWrite("done", "/tmp/done.txt");
+
+    process.stderr.write = original;
+
+    const lines = captured.trim().split("\n");
+    expect(lines.length).toBe(5);
+
+    for (const line of lines) {
+      const parsed = JSON.parse(line);
+      expect(typeof parsed.event).toBe("string");
+      expect(typeof parsed.run_id).toBe("string");
+      expect(typeof parsed.timestamp).toBe("string");
+      // Verify timestamp is valid ISO 8601
+      const date = new Date(parsed.timestamp);
+      expect(date.toISOString()).toBe(parsed.timestamp);
+    }
+
+    // Verify event-specific fields
+    const iterationEvent = JSON.parse(lines[0]);
+    expect(iterationEvent.event).toBe("iteration_start");
+    expect(iterationEvent.iteration).toBe(1);
+
+    const apiCallEvent = JSON.parse(lines[1]);
+    expect(apiCallEvent.event).toBe("api_call");
+    expect(apiCallEvent.model).toBe("claude-sonnet-4-20250514");
+    expect(apiCallEvent.input_tokens).toBe(100);
+    expect(apiCallEvent.output_tokens).toBe(200);
+    expect(apiCallEvent.latency_ms).toBe(350);
+
+    const toolCallEvent = JSON.parse(lines[2]);
+    expect(toolCallEvent.event).toBe("tool_call");
+    expect(toolCallEvent.tool).toBe("read");
+    expect(toolCallEvent.target).toBe("src/main.ts");
+    expect(toolCallEvent.permitted).toBe(true);
+    expect(toolCallEvent.duration_ms).toBe(12);
+
+    const completionEvent = JSON.parse(lines[3]);
+    expect(completionEvent.event).toBe("completion_check");
+    expect(completionEvent.status).toBe("in_progress");
+
+    const signalEvent = JSON.parse(lines[4]);
+    expect(signalEvent.event).toBe("signal_write");
+    expect(signalEvent.signal_type).toBe("done");
+    expect(signalEvent.path).toBe("/tmp/done.txt");
+  });
+
+  it("emits nothing to stderr when disabled", () => {
+    const logger = new Logger(false);
+
+    let captured = "";
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      return true;
+    };
+
+    logger.iterationStart(1);
+    logger.apiCall("claude-sonnet-4-20250514", 100, 200, 350);
+    logger.toolCall("read", "src/main.ts", true, 12);
+    logger.completionCheck("in_progress");
+    logger.signalWrite("done", "/tmp/done.txt");
+
+    process.stderr.write = original;
+
+    expect(captured).toBe("");
+  });
+
+  it("has a run_id that matches UUID format", () => {
+    const logger = new Logger(false);
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    expect(logger.runId).toMatch(uuidRegex);
+  });
+});

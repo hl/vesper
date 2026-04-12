@@ -78,6 +78,7 @@ export async function runCommand(
   command: string,
   args: string[],
   cwd: string,
+  timeoutSeconds = 30,
 ): Promise<{ stdout: string; stderr: string; exit_code: number }> {
   try {
     const proc = Bun.spawn([command, ...args], {
@@ -86,12 +87,27 @@ export async function runCommand(
       stderr: "pipe",
     });
 
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, timeoutSeconds * 1000);
+
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
     ]);
 
     await proc.exited;
+    clearTimeout(timer);
+
+    if (timedOut) {
+      return {
+        stdout,
+        stderr: `${stderr}\nCommand timed out after ${timeoutSeconds}s`,
+        exit_code: 124,
+      };
+    }
 
     return {
       stdout,

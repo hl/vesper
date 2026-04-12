@@ -198,4 +198,16 @@ describe("runCommand", () => {
     expect(result.exit_code).toBe(127);
     expect(result.stderr.length).toBeGreaterThan(0);
   });
+
+  it("completes normally when the command finishes within the timeout", async () => {
+    const result = await runCommand("echo", ["hello"], tempDir, 5);
+    expect(result.exit_code).toBe(0);
+    expect(result.stdout).toBe("hello\n");
+  });
+
+  it("returns exit_code 124 and stderr containing 'timed out' when the command exceeds the timeout", async () => {
+    const result = await runCommand("sleep", ["10"], tempDir, 1);
+    expect(result.exit_code).toBe(124);
+    expect(result.stderr).toContain("timed out");
+  }, 10_000);
 });

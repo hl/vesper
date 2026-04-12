@@ -15,6 +15,11 @@ function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
     system_prompt: "test.md",
     token_budget: overrides?.token_budget ?? 100_000,
     log_denied_calls: overrides?.log_denied_calls ?? false,
+    model: overrides?.model,
+    reveal_permissions: overrides?.reveal_permissions ?? false,
+    log_events: overrides?.log_events ?? false,
+    command_timeout: overrides?.command_timeout ?? 30,
+    scratchpad: overrides?.scratchpad ?? null,
     tools: {
       read: ["**"],
       write: ["**"],
@@ -428,6 +433,270 @@ describe("runAgent", () => {
     expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
     // Should not have written a failed signal
     expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(false);
+  });
+
+  // R1: Configurable model
+  it("passes config.model to the API client when set", async () => {
+    const config = makeConfig({
+      model: "claude-opus-4-20250514",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "model-agent", stubClient);
+
+    expect(capturedParams).toBeDefined();
+    expect(capturedParams?.model).toBe("claude-opus-4-20250514");
+  });
+
+  // R2: Prompt caching — system is an array with cache_control
+  it("sends system prompt as an array with cache_control for prompt caching", async () => {
+    const config = makeConfig({
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system prompt text", "task", tempDir, "cache-agent", stubClient);
+
+    expect(capturedParams).toBeDefined();
+    expect(Array.isArray(capturedParams?.system)).toBe(true);
+    const systemBlocks = capturedParams?.system as Array<{
+      type: string;
+      text?: string;
+      cache_control?: { type: string };
+    }>;
+    expect(systemBlocks.length).toBeGreaterThan(0);
+    expect(systemBlocks[0].type).toBe("text");
+    expect(systemBlocks[0].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  // R3: Tool filtering — only read tools when write/delete/commands are empty
+  it("sends only read tools when write, delete, and commands are empty arrays", async () => {
+    const config = makeConfig({
+      tools: { read: ["**"], write: [], delete: [], commands: [] },
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "filter-agent", stubClient);
+
+    expect(capturedParams).toBeDefined();
+    const toolNames = capturedParams?.tools?.map((t) => (t as Anthropic.Tool).name);
+    expect(toolNames).toContain("read_file");
+    expect(toolNames).toContain("list_files");
+    expect(toolNames).not.toContain("write_file");
+    expect(toolNames).not.toContain("patch_file");
+    expect(toolNames).not.toContain("delete_file");
+    expect(toolNames).not.toContain("run_command");
+  });
+
+  // R4: Permission transparency — reveal_permissions: true
+  it("includes tool, target, and allowed_patterns in denial when reveal_permissions is true", async () => {
+    const config = makeConfig({
+      reveal_permissions: true,
+      tools: { read: ["**"], write: ["src/**"], delete: ["**"], commands: [] },
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedToolResult: string | undefined;
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("write_file", { path: "secrets.env", content: "bad" }, "toolu_w1"),
+            ],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        const msgs = params.messages;
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          const toolResult = lastMsg.content[0];
+          if (typeof toolResult === "object" && "content" in toolResult) {
+            capturedToolResult = toolResult.content as string;
+          }
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "reveal-agent", stubClient);
+
+    expect(capturedToolResult).toBeDefined();
+    const parsed = JSON.parse(capturedToolResult as string);
+    expect(parsed.error).toBe("permission_denied");
+    expect(parsed.tool).toBe("write_file");
+    expect(parsed.target).toBe("secrets.env");
+    expect(parsed.allowed_patterns).toEqual(["src/**"]);
+  });
+
+  // R5: Permission transparency off — reveal_permissions: false (default)
+  it("returns plain permission_denied with no extra fields when reveal_permissions is false", async () => {
+    const config = makeConfig({
+      reveal_permissions: false,
+      tools: { read: ["**"], write: ["src/**"], delete: ["**"], commands: [] },
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedToolResult: string | undefined;
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("write_file", { path: "secrets.env", content: "bad" }, "toolu_w2"),
+            ],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        const msgs = params.messages;
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          const toolResult = lastMsg.content[0];
+          if (typeof toolResult === "object" && "content" in toolResult) {
+            capturedToolResult = toolResult.content as string;
+          }
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "opaque-agent", stubClient);
+
+    expect(capturedToolResult).toBeDefined();
+    const parsed = JSON.parse(capturedToolResult as string);
+    expect(parsed).toEqual({ error: "permission_denied" });
+    expect(parsed.tool).toBeUndefined();
+    expect(parsed.target).toBeUndefined();
+    expect(parsed.allowed_patterns).toBeUndefined();
+  });
+
+  // R9: Scratchpad injection — file exists
+  it("injects scratchpad contents before the task prompt when scratchpad file exists", async () => {
+    const config = makeConfig({
+      scratchpad: "scratch.md",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    writeFileSync(join(tempDir, "scratch.md"), "Some previous context here.");
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "do the task", tempDir, "scratch-agent", stubClient);
+
+    expect(capturedParams).toBeDefined();
+    const firstMsg = capturedParams?.messages[0] as Anthropic.MessageParam;
+    expect(firstMsg.role).toBe("user");
+    const content = firstMsg.content as string;
+    expect(content.startsWith("[Previous Context]")).toBe(true);
+    expect(content).toContain("Some previous context here.");
+    expect(content).toContain("do the task");
+  });
+
+  // R9: Scratchpad injection — file missing
+  it("sends plain task prompt when scratchpad file does not exist", async () => {
+    const config = makeConfig({
+      scratchpad: "nonexistent-scratch.md",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "do the task", tempDir, "no-scratch-agent", stubClient);
+
+    expect(capturedParams).toBeDefined();
+    const firstMsg = capturedParams?.messages[0] as Anthropic.MessageParam;
+    expect(firstMsg.role).toBe("user");
+    const content = firstMsg.content as string;
+    expect(content).toBe("do the task");
+  });
+
+  // R12: max_tokens truncation
+  it("writes failed signal with truncated message when stop_reason is max_tokens", async () => {
+    const config = makeConfig({
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    const stubClient: MessageClient = {
+      create: async () =>
+        makeMessage({
+          stop_reason: "max_tokens",
+          content: [makeTextBlock("Partial output that got cut off")],
+          usage: { input_tokens: 50, output_tokens: 4096 },
+        }),
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "trunc-agent", stubClient);
+
+    expect(result.exitCode).toBe(1);
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("error");
+    expect(payload.agent).toBe("trunc-agent");
+    expect(payload.message.toLowerCase()).toContain("truncated");
   });
 });
 

@@ -453,4 +453,125 @@ completion: {}
       expect((e as VesperError).message).toContain("not found");
     }
   });
+
+  it("exits with code 1 when model is a non-string value", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+model: 42
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("bad-model.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("model");
+    }
+  });
+
+  it("parses model correctly when it is a valid string", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+model: claude-sonnet-4-20250514
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("valid-model.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.model).toBe("claude-sonnet-4-20250514");
+  });
+
+  it("exits with code 1 when command_timeout is zero", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+command_timeout: 0
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("zero-timeout.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("command_timeout");
+    }
+  });
+
+  it("exits with code 1 when command_timeout is a string", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+command_timeout: "fast"
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("string-timeout.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("command_timeout");
+    }
+  });
+
+  it("exits with code 1 when scratchpad is a non-string value", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+scratchpad: 42
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("bad-scratchpad.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("scratchpad");
+    }
+  });
+
+  it("parses scratchpad correctly when it is a valid string", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+scratchpad: /tmp/scratch.md
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("valid-scratchpad.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.scratchpad).toBe("/tmp/scratch.md");
+  });
+
+  it("has correct v0.2 defaults when no new fields are specified", () => {
+    const path = writeYaml("defaults-v02.yml", minimalYaml);
+    const config = loadConfig(path);
+
+    expect(config.model).toBeUndefined();
+    expect(config.reveal_permissions).toBe(false);
+    expect(config.log_events).toBe(false);
+    expect(config.command_timeout).toBe(30);
+    expect(config.scratchpad).toBeNull();
+  });
 });

@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
-import { join, } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import { load as yamlLoad } from "js-yaml";
 import { VesperError } from "./errors.js";
@@ -8,6 +8,11 @@ export interface AgentConfig {
   system_prompt: string;
   token_budget: number;
   log_denied_calls: boolean;
+  model: string | undefined;
+  reveal_permissions: boolean;
+  log_events: boolean;
+  command_timeout: number;
+  scratchpad: string | null;
   tools: {
     read: string[];
     write: string[];
@@ -172,12 +177,37 @@ export function loadConfig(configPath: string): AgentConfig {
     );
   }
 
+  // Optional v0.2 fields
+  const model = parsed.model;
+  if (model !== undefined && typeof model !== "string") {
+    throw new VesperError(`"model" must be a string in ${configPath}`, 1);
+  }
+
+  const commandTimeout = parsed.command_timeout ?? 30;
+  if (typeof commandTimeout !== "number" || commandTimeout <= 0) {
+    throw new VesperError(`"command_timeout" must be a positive number in ${configPath}`, 1);
+  }
+
+  const scratchpad = parsed.scratchpad ?? null;
+  if (scratchpad !== null && typeof scratchpad !== "string") {
+    throw new VesperError(`"scratchpad" must be a string or null in ${configPath}`, 1);
+  }
+
   return {
     system_prompt: parsed.system_prompt,
     token_budget: parsed.token_budget,
     log_denied_calls: typeof parsed.log_denied_calls === "boolean"
       ? parsed.log_denied_calls
       : false,
+    model: model as string | undefined,
+    reveal_permissions: typeof parsed.reveal_permissions === "boolean"
+      ? parsed.reveal_permissions
+      : false,
+    log_events: typeof parsed.log_events === "boolean"
+      ? parsed.log_events
+      : false,
+    command_timeout: commandTimeout,
+    scratchpad,
     tools: {
       read: toolRead,
       write: toolWrite,

@@ -1,12 +1,13 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 import type { AgentConfig } from "./config.js";
 import { CompletionTracker } from "./completion.js";
 import { checkPathPermission, checkCommandPermission, logDeniedCall } from "./permissions.js";
-import { writeComplete, writeNeedsApproval, writeFailed } from "./signals.js";
+import { writeComplete, writeNeedsApproval, writeFailed, getSignalPaths } from "./signals.js";
 import { readFile, listFiles, writeFile, patchFile, deleteFile, runCommand } from "./tools.js";
+import { Logger } from "./logger.js";
 
-const MODEL = "claude-sonnet-4-5-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-5-20250514";
 const MAX_OUTPUT_TOKENS = 4096;
 const MAX_ITERATIONS = 1000;
 
@@ -92,6 +93,28 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
 ];
 
+// R3: Filter tool definitions to only include tools the agent has permission to use
+function filterTools(config: AgentConfig): Anthropic.Tool[] {
+  const toolPermissionMap: Record<string, string[]> = {
+    read_file: config.tools.read,
+    list_files: config.tools.read,
+    write_file: config.tools.write,
+    patch_file: config.tools.write,
+    delete_file: config.tools.delete,
+    run_command: config.tools.commands,
+  };
+  const filtered = TOOL_DEFINITIONS.filter((tool) => {
+    const list = toolPermissionMap[tool.name];
+    return list !== undefined && list.length > 0;
+  });
+  // R2: Apply cache_control to the last tool definition for prompt caching
+  if (filtered.length > 0) {
+    const last = filtered[filtered.length - 1];
+    filtered[filtered.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
+  }
+  return filtered;
+}
+
 function validateString(input: Record<string, unknown>, field: string): string | null {
   const val = input[field];
   return typeof val === "string" ? val : null;
@@ -123,6 +146,24 @@ function getPermissionList(
   }
 }
 
+// R4/R5: Build denial response — structured when reveal_permissions is true, opaque otherwise
+function denialResponse(
+  config: AgentConfig,
+  toolName: string,
+  target: string,
+  allowedPatterns?: string[],
+): string {
+  if (config.reveal_permissions) {
+    return JSON.stringify({
+      error: "permission_denied",
+      tool: toolName,
+      target,
+      ...(allowedPatterns !== undefined ? { allowed_patterns: allowedPatterns } : {}),
+    });
+  }
+  return JSON.stringify({ error: "permission_denied" });
+}
+
 export async function executeTool(
   toolName: string,
   input: unknown,
@@ -131,7 +172,7 @@ export async function executeTool(
 ): Promise<string> {
   const perm = getPermissionList(toolName, config);
   if (perm === null) {
-    return JSON.stringify({ error: "permission_denied" });
+    return denialResponse(config, toolName, "unknown");
   }
 
   const inp = typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {};
@@ -139,13 +180,13 @@ export async function executeTool(
   if (perm.type === "path") {
     const path = validateString(inp, "path");
     if (path === null) {
-      return JSON.stringify({ error: "permission_denied" });
+      return denialResponse(config, toolName, "invalid_input", perm.list);
     }
     if (!checkPathPermission(path, cwd, perm.list)) {
       if (config.log_denied_calls) {
         logDeniedCall(toolName, path);
       }
-      return JSON.stringify({ error: "permission_denied" });
+      return denialResponse(config, toolName, path, perm.list);
     }
 
     const resolvedPath = resolve(cwd, path);
@@ -157,18 +198,18 @@ export async function executeTool(
         return JSON.stringify(await listFiles(resolvedPath));
       case "write_file": {
         const content = validateString(inp, "content");
-        if (content === null) return JSON.stringify({ error: "permission_denied" });
+        if (content === null) return denialResponse(config, toolName, path, perm.list);
         return JSON.stringify(await writeFile(resolvedPath, content));
       }
       case "patch_file": {
         const patch = validateString(inp, "patch");
-        if (patch === null) return JSON.stringify({ error: "permission_denied" });
+        if (patch === null) return denialResponse(config, toolName, path, perm.list);
         return JSON.stringify(await patchFile(resolvedPath, patch));
       }
       case "delete_file":
         return JSON.stringify(await deleteFile(resolvedPath));
       default:
-        return JSON.stringify({ error: "permission_denied" });
+        return denialResponse(config, toolName, path, perm.list);
     }
   }
 
@@ -176,16 +217,16 @@ export async function executeTool(
   const command = validateString(inp, "command");
   const args = validateStringArray(inp, "args");
   if (command === null || args === null) {
-    return JSON.stringify({ error: "permission_denied" });
+    return denialResponse(config, toolName, "invalid_input", config.tools.commands);
   }
   if (!checkCommandPermission(command, args, config.tools.commands)) {
     if (config.log_denied_calls) {
       logDeniedCall(toolName, `${command} ${args.join(" ")}`);
     }
-    return JSON.stringify({ error: "permission_denied" });
+    return denialResponse(config, toolName, `${command} ${args.join(" ")}`, config.tools.commands);
   }
 
-  return JSON.stringify(await runCommand(command, args, cwd));
+  return JSON.stringify(await runCommand(command, args, cwd, config.command_timeout));
 }
 
 export interface RunAgentResult {
@@ -211,6 +252,19 @@ export async function runAgent(
     config.completion.no_progress_limit,
     cwd,
   );
+  const logger = new Logger(config.log_events);
+  const signalPaths = getSignalPaths(cwd);
+
+  // R1: Configurable model per agent
+  const model = config.model ?? DEFAULT_MODEL;
+
+  // R3: Filter tools to match permissions; R2: cache_control applied inside filterTools
+  const tools = filterTools(config);
+
+  // R2: System prompt as structured content block with cache_control
+  const systemBlocks: Anthropic.TextBlockParam[] = [
+    { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
+  ];
 
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
@@ -220,35 +274,67 @@ export async function runAgent(
   // Context does not accumulate across iterations (by design).
   while (iterationCount < MAX_ITERATIONS) {
     iterationCount++;
+    logger.iterationStart(iterationCount);
+
+    // R9: Inject scratchpad contents before task prompt if configured
+    let userContent = taskPrompt;
+    if (config.scratchpad !== null) {
+      const scratchpadPath = join(cwd, config.scratchpad);
+      const scratchpadFile = Bun.file(scratchpadPath);
+      if (await scratchpadFile.exists()) {
+        const scratchpadContent = await scratchpadFile.text();
+        if (scratchpadContent.trim().length > 0) {
+          userContent = `[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
+        }
+      }
+    }
+
     let messages: Anthropic.MessageParam[] = [
-      { role: "user", content: taskPrompt },
+      { role: "user", content: userContent },
     ];
 
     // Tool loop within this iteration
     while (true) {
       let response: Anthropic.Message;
+      const callStart = Date.now();
       try {
         response = await messagesClient.create({
-          model: MODEL,
+          model,
           max_tokens: MAX_OUTPUT_TOKENS,
-          system: systemPrompt,
-          tools: TOOL_DEFINITIONS,
+          system: systemBlocks,
+          tools,
           messages,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await writeFailed(cwd, agentName, "error", `API error: ${message}`);
+        logger.signalWrite("failed", signalPaths.failed);
         return { exitCode: 1 };
       }
+      const callLatency = Date.now() - callStart;
 
       // Track usage after each API call
       totalInputTokens += response.usage.input_tokens;
       totalOutputTokens += response.usage.output_tokens;
+      logger.apiCall(model, response.usage.input_tokens, response.usage.output_tokens, callLatency);
 
-      // Check token budget after each API call (not just after iteration)
+      // Check token budget after each API call
       if (totalInputTokens + totalOutputTokens >= config.token_budget) {
         await writeNeedsApproval(cwd, agentName, config.token_budget, totalInputTokens, totalOutputTokens);
+        logger.signalWrite("needs_approval", signalPaths.needsApproval);
         return { exitCode: 0 };
+      }
+
+      // R12: Treat max_tokens truncation as an error
+      if (response.stop_reason === "max_tokens") {
+        await writeFailed(
+          cwd,
+          agentName,
+          "error",
+          "Response truncated: stop_reason was 'max_tokens'. The model's output exceeded the per-call limit.",
+        );
+        logger.signalWrite("failed", signalPaths.failed);
+        return { exitCode: 1 };
       }
 
       // If no tool use, iteration is complete
@@ -263,12 +349,23 @@ export async function runAgent(
 
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const toolUse of toolUseBlocks) {
+        const toolStart = Date.now();
         const result = await executeTool(
           toolUse.name,
           toolUse.input,
           cwd,
           config,
         );
+        const toolDuration = Date.now() - toolStart;
+        const parsed = JSON.parse(result) as Record<string, unknown>;
+        const permitted = parsed.error !== "permission_denied";
+        const target = typeof (toolUse.input as Record<string, unknown>)?.path === "string"
+          ? (toolUse.input as Record<string, unknown>).path as string
+          : typeof (toolUse.input as Record<string, unknown>)?.command === "string"
+            ? (toolUse.input as Record<string, unknown>).command as string
+            : toolUse.name;
+        logger.toolCall(toolUse.name, target as string, permitted, toolDuration);
+
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
@@ -286,8 +383,11 @@ export async function runAgent(
 
     // Check completion condition
     const completionStatus = await tracker.check();
+    logger.completionCheck(completionStatus);
+
     if (completionStatus === "complete") {
       await writeComplete(cwd);
+      logger.signalWrite("complete", signalPaths.complete);
       return { exitCode: 0 };
     }
     if (completionStatus === "no_progress") {
@@ -297,16 +397,17 @@ export async function runAgent(
         "no_progress",
         `No progress detected after ${config.completion.no_progress_limit} consecutive iterations.`,
       );
+      logger.signalWrite("failed", signalPaths.failed);
       return { exitCode: 1 };
     }
 
     // "continue" — next iteration
   }
 
-  // Max iterations reached — treat as completion for agents without watch_file,
-  // or as failure for agents that should have completed.
+  // Max iterations reached
   if (config.completion.watch_file === null) {
     await writeComplete(cwd);
+    logger.signalWrite("complete", signalPaths.complete);
     return { exitCode: 0 };
   }
   await writeFailed(
@@ -315,5 +416,6 @@ export async function runAgent(
     "error",
     `Maximum iteration limit (${MAX_ITERATIONS}) reached without completion.`,
   );
+  logger.signalWrite("failed", signalPaths.failed);
   return { exitCode: 1 };
 }

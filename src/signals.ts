@@ -20,13 +20,13 @@ function resolveSignalPath(cwd: string, name: string): string {
   return resolved;
 }
 
-interface SignalPaths {
+export interface SignalPaths {
   complete: string;
   needsApproval: string;
   failed: string;
 }
 
-function getSignalPaths(cwd: string): SignalPaths {
+export function getSignalPaths(cwd: string): SignalPaths {
   const complete = process.env.VESPER_SIGNAL_COMPLETE ?? ".vesper-complete";
   const needsApproval = process.env.VESPER_SIGNAL_NEEDS_APPROVAL ?? ".vesper-needs-approval";
   const failed = process.env.VESPER_SIGNAL_FAILED ?? ".vesper-failed";
