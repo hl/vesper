@@ -49,14 +49,6 @@ export function checkPathPermission(
   }
 
   const rel = relative(realCwd, real);
-  // When the path resolves to cwd itself (e.g., list_files(".")),
-  // relative() returns "". Match against both "" and "." since globs
-  // like "**" match "." but not the empty string.
-  if (rel === "") {
-    return allowList.some(
-      (pattern) => minimatch(".", pattern) || minimatch("", pattern),
-    );
-  }
   return allowList.some((pattern) => minimatch(rel, pattern));
 }
 

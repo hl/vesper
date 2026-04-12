@@ -174,8 +174,8 @@ async function executeTool(
 
   // Command
   const command = validateString(inp, "command");
-  const args = validateStringArray(inp, "args") ?? [];
-  if (command === null) {
+  const args = validateStringArray(inp, "args");
+  if (command === null || args === null) {
     return JSON.stringify({ error: "permission_denied" });
   }
   if (!checkCommandPermission(command, args, config.tools.commands)) {
