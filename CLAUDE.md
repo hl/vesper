@@ -39,7 +39,7 @@ Core flow through source:
 
 - `index.ts` — CLI entry. Parses args (yargs), resolves agent config, early completion check, reads task from stdin, hands off to `runAgent`.
 - `agent.ts` — Core loop. Each **iteration** is a fresh API conversation (no context carry-forward). Within an iteration, tool calls loop until the model stops. After each iteration, checks completion.
-- `config.ts` — YAML agent config loading and validation. Resolution: `.vesper/` in cwd first, then `~/.config/vesper/`.
+- `config.ts` — YAML agent config loading and validation. Resolution: `.vesper/agents/` in cwd first, then `~/.config/vesper/`.
 - `permissions.ts` — Path: `minimatch` globs against symlink-resolved path relative to cwd. Command: binary name, optionally with first argument.
 - `tools.ts` — Six tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command`. Results truncated to `max_tool_result_size`.
 - `completion.ts` — `CompletionTracker` monitors watch file line count. Empty/missing = complete. No change for N iterations = no_progress.
@@ -78,8 +78,9 @@ Core flow through source:
 
 | Resource | Location |
 |----------|----------|
-| Agent definitions | `.vesper/` (`<name>.yml` + `<name>.md`) |
+| Agent definitions | `.vesper/agents/` (`<name>.yml` + `<name>.md`) |
 | Planning docs | `docs/plans/` |
 | Requirements / brainstorms | `docs/brainstorms/` |
 | Documented solutions | `docs/solutions/` (best practices, patterns, past fixes — YAML frontmatter searchable by `module`, `tags`, `problem_type`) |
-| Example full config | `.vesper/builder.yml` |
+| Example full config | `.vesper/agents/builder.yml` |
+| Skills directory | `.vesper/skills/` (Markdown skill files injected at startup) |

@@ -26,7 +26,7 @@ The task prompt is read from stdin. The binary blocks until stdin is closed.
 
 ## Agent Definition
 
-Each agent is defined by two files in `.vesper/` (or `~/.config/vesper/`):
+Each agent is defined by two files in `.vesper/agents/` (or `~/.config/vesper/`):
 
 **`<agent>.yml`** — structural constraints:
 
@@ -40,7 +40,8 @@ reveal_permissions: false
 command_timeout: 30                # seconds, default: 30
 command_env: []                    # extra env vars for commands, default: []
 max_tool_result_size: 102400       # bytes, default: 100KB
-scratchpad: docs/plans/.scratchpad-builder.md  # optional
+scratchpad: .vesper/.scratchpad-builder.md     # optional
+skills: .vesper/skills                        # optional, directory of .md skill files
 
 signals:
   complete: ".vesper-complete"
@@ -69,7 +70,7 @@ completion:
 
 ## Config Resolution
 
-1. `<cwd>/.vesper/<agent>.yml` + `<cwd>/.vesper/<agent>.md`
+1. `<cwd>/.vesper/agents/<agent>.yml` + `<cwd>/.vesper/agents/<agent>.md`
 2. `~/.config/vesper/<agent>.yml` + `~/.config/vesper/<agent>.md`
 
 Both files must exist at the same location.

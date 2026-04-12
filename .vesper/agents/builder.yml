@@ -3,7 +3,8 @@ token_budget: 100000
 log_denied_calls: false
 log_events: false
 command_timeout: 60
-scratchpad: "docs/plans/.scratchpad-builder.md"
+scratchpad: ".vesper/.scratchpad-builder.md"
+skills: ".vesper/skills"
 command_env: []
 
 signals:

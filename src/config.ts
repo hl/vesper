@@ -21,6 +21,7 @@ export interface AgentConfig {
   command_env: string[];
   max_tool_result_size: number;
   scratchpad: string | null;
+  skills: string | null;
   signals: SignalConfig;
   tools: {
     read: string[];
@@ -42,7 +43,7 @@ export interface ResolvedAgent {
 
 export function resolveAgent(name: string, cwd: string, home?: string): ResolvedAgent {
   const homeDir = home ?? homedir();
-  const locations = [join(cwd, ".vesper"), join(homeDir, ".config", "vesper")];
+  const locations = [join(cwd, ".vesper", "agents"), join(homeDir, ".config", "vesper")];
 
   for (const dir of locations) {
     const ymlPath = join(dir, `${name}.yml`);
@@ -61,6 +62,18 @@ export function resolveAgent(name: string, cwd: string, home?: string): Resolved
     if (!ymlExists && mdExists) {
       throw new VesperError(`Found ${mdPath} but missing ${ymlPath}`, 1);
     }
+  }
+
+  // Check if agent exists at the old .vesper/ path and provide migration hint
+  const oldDir = join(cwd, ".vesper");
+  const oldYml = join(oldDir, `${name}.yml`);
+  const oldMd = join(oldDir, `${name}.md`);
+  if (existsSync(oldYml) || existsSync(oldMd)) {
+    throw new VesperError(
+      `Agent "${name}" found at ${oldDir} but Vesper now expects ${locations[0]}. ` +
+        `Run: mkdir -p .vesper/agents && mv .vesper/*.yml .vesper/*.md .vesper/agents/`,
+      1,
+    );
   }
 
   throw new VesperError(`Agent "${name}" not found in ${locations.join(" or ")}`, 1);
@@ -156,6 +169,11 @@ export function loadConfig(configPath: string): AgentConfig {
     throw new VesperError(`"scratchpad" must be a string or null in ${configPath}`, 1);
   }
 
+  const skills = parsed.skills ?? null;
+  if (skills !== null && typeof skills !== "string") {
+    throw new VesperError(`"skills" must be a string or null in ${configPath}`, 1);
+  }
+
   // v0.3: command_env
   const commandEnv = parsed.command_env ?? [];
   assertStringArray(commandEnv, "command_env");
@@ -204,6 +222,7 @@ export function loadConfig(configPath: string): AgentConfig {
     command_env: commandEnv,
     max_tool_result_size: maxToolResultSize,
     scratchpad,
+    skills,
     signals,
     tools: {
       read: toolRead,

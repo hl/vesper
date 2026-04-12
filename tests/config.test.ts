@@ -13,7 +13,7 @@ describe("resolveAgent", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "vesper-test-"));
-    cwdVesper = join(tempDir, "project", ".vesper");
+    cwdVesper = join(tempDir, "project", ".vesper", "agents");
     fakeHome = join(tempDir, "fakehome");
     homeVesper = join(fakeHome, ".config", "vesper");
   });
@@ -101,6 +101,23 @@ describe("resolveAgent", () => {
       expect(e).toBeInstanceOf(VesperError);
       expect((e as VesperError).code).toBe(1);
       expect((e as VesperError).message).toContain("nonexistent");
+    }
+  });
+
+  it("shows migration hint when agent exists at old .vesper/ path", () => {
+    const oldDir = join(tempDir, "project", ".vesper");
+    mkdirSync(oldDir, { recursive: true });
+    writeFileSync(join(oldDir, "myagent.yml"), "system_prompt: prompt.md\n");
+    writeFileSync(join(oldDir, "myagent.md"), "# Prompt\n");
+
+    try {
+      resolveAgent("myagent", join(tempDir, "project"), fakeHome);
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain(".vesper/agents");
+      expect((e as VesperError).message).toContain("mkdir -p");
     }
   });
 });
@@ -548,6 +565,40 @@ completion: {}
     expect(config.scratchpad).toBe("/tmp/scratch.md");
   });
 
+  it("exits with code 1 when skills is a non-string value", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+skills: 42
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("bad-skills.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("skills");
+    }
+  });
+
+  it("parses skills correctly when it is a valid string", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+skills: .vesper/skills
+tools: {}
+completion: {}
+`;
+    const path = writeYaml("valid-skills.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.skills).toBe(".vesper/skills");
+  });
+
   it("has correct v0.2 defaults when no new fields are specified", () => {
     const path = writeYaml("defaults-v02.yml", minimalYaml);
     const config = loadConfig(path);
@@ -557,5 +608,6 @@ completion: {}
     expect(config.log_events).toBe(false);
     expect(config.command_timeout).toBe(30);
     expect(config.scratchpad).toBeNull();
+    expect(config.skills).toBeNull();
   });
 });

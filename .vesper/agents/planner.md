@@ -12,7 +12,7 @@ Each iteration:
 4. Derive implementation tasks from the spec. Each task should be a concrete, actionable unit of work.
 5. Append the tasks to `docs/plans/task-queue.md`, one task per line. Each line should be a concise description of what needs to be done.
 6. Remove the processed entry from `docs/plans/spec-queue.md`.
-7. Update your scratchpad at `docs/plans/.scratchpad-planner.md` with a summary of what you did this iteration and any context the next iteration should know.
+7. Update your scratchpad at `.vesper/.scratchpad-planner.md` with a summary of what you did this iteration and any context the next iteration should know.
 
 ## Task Format
 

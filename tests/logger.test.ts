@@ -17,11 +17,12 @@ describe("Logger", () => {
     logger.toolCall("read", "src/main.ts", true, 12);
     logger.completionCheck("in_progress");
     logger.signalWrite("done", "/tmp/done.txt");
+    logger.skillsLoaded(3, 4096, ["a.md", "b.md", "c.md"]);
 
     process.stderr.write = original;
 
     const lines = captured.trim().split("\n");
-    expect(lines.length).toBe(5);
+    expect(lines.length).toBe(6);
 
     for (const line of lines) {
       const parsed = JSON.parse(line);
@@ -60,6 +61,12 @@ describe("Logger", () => {
     expect(signalEvent.event).toBe("signal_write");
     expect(signalEvent.signal_type).toBe("done");
     expect(signalEvent.path).toBe("/tmp/done.txt");
+
+    const skillsEvent = JSON.parse(lines[5]);
+    expect(skillsEvent.event).toBe("skills_loaded");
+    expect(skillsEvent.file_count).toBe(3);
+    expect(skillsEvent.total_bytes).toBe(4096);
+    expect(skillsEvent.files).toEqual(["a.md", "b.md", "c.md"]);
   });
 
   it("emits nothing to stderr when disabled", () => {
@@ -77,6 +84,7 @@ describe("Logger", () => {
     logger.toolCall("read", "src/main.ts", true, 12);
     logger.completionCheck("in_progress");
     logger.signalWrite("done", "/tmp/done.txt");
+    logger.skillsLoaded(2, 1024, ["x.md", "y.md"]);
 
     process.stderr.write = original;
 

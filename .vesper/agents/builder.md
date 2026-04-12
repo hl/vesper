@@ -15,7 +15,7 @@ Each iteration:
    - Follow existing code conventions.
 5. Run `git commit` with a clear message describing the change.
 6. Remove the completed task entry from `docs/plans/task-queue.md`.
-7. Update your scratchpad at `docs/plans/.scratchpad-builder.md` with:
+7. Update your scratchpad at `.vesper/.scratchpad-builder.md` with:
    - What you implemented this iteration.
    - Any decisions you made and why.
    - Context the next iteration should know (e.g., partially complete work, dependencies).

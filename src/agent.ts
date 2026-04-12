@@ -1,5 +1,5 @@
-import { realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { extname, resolve, sep } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { CompletionTracker } from "./completion.js";
 import type { AgentConfig } from "./config.js";
@@ -95,6 +95,81 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
     strict: true,
   },
 ];
+
+/**
+ * Resolve a path and check if it is inside cwd.
+ * Returns the resolved real path if inside cwd, or null if outside or unresolvable.
+ */
+export function isInsideCwd(targetPath: string, cwd: string): string | null {
+  let realCwd: string;
+  try {
+    realCwd = realpathSync(cwd);
+  } catch {
+    realCwd = cwd;
+  }
+  const normalizedCwd = realCwd.endsWith(sep) ? realCwd : realCwd + sep;
+  let realTarget: string | null;
+  try {
+    realTarget = realpathSync(targetPath);
+  } catch {
+    realTarget = null;
+  }
+  if (realTarget !== null && (realTarget === realCwd || realTarget.startsWith(normalizedCwd))) {
+    return realTarget;
+  }
+  return null;
+}
+
+/**
+ * Load skill files from a directory. Returns the composed skills string or null.
+ */
+export function loadSkills(skillsDir: string, cwd: string, logger: Logger): string | null {
+  const resolvedDir = resolve(cwd, skillsDir);
+
+  // Containment check
+  const realDir = isInsideCwd(resolvedDir, cwd);
+  if (realDir === null) return null;
+
+  // Must be a directory
+  try {
+    const stat = statSync(realDir);
+    if (!stat.isDirectory()) return null;
+  } catch {
+    return null;
+  }
+
+  // Read and filter .md files
+  let entries: string[];
+  try {
+    entries = readdirSync(realDir);
+  } catch {
+    return null;
+  }
+
+  const mdFiles = entries.filter((e) => extname(e) === ".md").sort();
+  if (mdFiles.length === 0) return null;
+
+  const parts: string[] = [];
+  const loadedFiles: string[] = [];
+  let totalBytes = 0;
+
+  for (const filename of mdFiles) {
+    try {
+      const content = readFileSync(resolve(realDir, filename), "utf-8");
+      if (content.trim().length === 0) continue;
+      parts.push(`## ${filename}\n${content}`);
+      loadedFiles.push(filename);
+      totalBytes += Buffer.byteLength(content, "utf-8");
+    } catch {
+      // Skip individual file read errors
+    }
+  }
+
+  if (parts.length === 0) return null;
+
+  logger.skillsLoaded(loadedFiles.length, totalBytes, loadedFiles);
+  return `[Skills]\n\n${parts.join("\n\n")}`;
+}
 
 // R3: Filter tool definitions to only include tools the agent has permission to use
 function filterTools(config: AgentConfig): Anthropic.Tool[] {
@@ -286,42 +361,41 @@ export async function runAgent(
   let totalOutputTokens = 0;
   let iterationCount = 0;
 
+  // Load skills once before the iteration loop (R6)
+  const skillsContent = config.skills !== null ? loadSkills(config.skills, cwd, logger) : null;
+
   // Iteration loop — each iteration is a fresh API conversation.
   // Context does not accumulate across iterations (by design).
   while (iterationCount < MAX_ITERATIONS) {
     iterationCount++;
     logger.iterationStart(iterationCount);
 
-    // R9: Inject scratchpad contents before task prompt if configured
+    // Build user message: [Skills] → [Previous Context] → [Task]
     let userContent = taskPrompt;
+
+    // R9: Inject scratchpad contents (re-read each iteration to capture agent writes)
+    let scratchpadContent: string | null = null;
     if (config.scratchpad !== null) {
       const scratchpadPath = resolve(cwd, config.scratchpad);
-      // Containment check — scratchpad must be inside cwd
-      let realCwd: string;
-      try {
-        realCwd = realpathSync(cwd);
-      } catch {
-        realCwd = cwd;
-      }
-      const normalizedCwd = realCwd.endsWith(sep) ? realCwd : realCwd + sep;
-      let realScratchpad: string | null;
-      try {
-        realScratchpad = realpathSync(scratchpadPath);
-      } catch {
-        realScratchpad = null;
-      }
-      if (
-        realScratchpad !== null &&
-        (realScratchpad === realCwd || realScratchpad.startsWith(normalizedCwd))
-      ) {
+      const realScratchpad = isInsideCwd(scratchpadPath, cwd);
+      if (realScratchpad !== null) {
         const scratchpadFile = Bun.file(realScratchpad);
         if (await scratchpadFile.exists()) {
-          const scratchpadContent = await scratchpadFile.text();
-          if (scratchpadContent.trim().length > 0) {
-            userContent = `[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
+          const text = await scratchpadFile.text();
+          if (text.trim().length > 0) {
+            scratchpadContent = text;
           }
         }
       }
+    }
+
+    // Compose user message based on which sections are present
+    if (skillsContent !== null && scratchpadContent !== null) {
+      userContent = `${skillsContent}\n\n[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
+    } else if (skillsContent !== null) {
+      userContent = `${skillsContent}\n\n[Task]\n${taskPrompt}`;
+    } else if (scratchpadContent !== null) {
+      userContent = `[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
     }
 
     let messages: Anthropic.MessageParam[] = [{ role: "user", content: userContent }];

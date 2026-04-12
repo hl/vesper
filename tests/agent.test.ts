@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -22,6 +22,7 @@ function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
     command_env: overrides?.command_env ?? [],
     max_tool_result_size: overrides?.max_tool_result_size ?? 102400,
     scratchpad: overrides?.scratchpad ?? null,
+    skills: overrides?.skills ?? null,
     signals: overrides?.signals ?? {
       complete: ".vesper-complete",
       needs_approval: ".vesper-needs-approval",
@@ -691,6 +692,274 @@ describe("runAgent", () => {
     expect(payload.reason).toBe("error");
     expect(payload.agent).toBe("trunc-agent");
     expect(payload.message.toLowerCase()).toContain("truncated");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Skill injection tests
+// ---------------------------------------------------------------------------
+
+describe("skill injection", () => {
+  it("injects skills from .md files before task prompt", async () => {
+    const skillsDir = join(tempDir, ".vesper", "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(join(skillsDir, "patterns.md"), "Use pattern X for Y.");
+    writeFileSync(join(skillsDir, "conventions.md"), "Always use strict mode.");
+
+    const config = makeConfig({
+      skills: ".vesper/skills",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "do the task", tempDir, "skill-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    expect(content).toContain("[Skills]");
+    expect(content).toContain("## conventions.md");
+    expect(content).toContain("## patterns.md");
+    expect(content).toContain("Always use strict mode.");
+    expect(content).toContain("Use pattern X for Y.");
+    expect(content).toContain("[Task]\ndo the task");
+  });
+
+  it("sorts skill files lexicographically", async () => {
+    const skillsDir = join(tempDir, ".vesper", "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(join(skillsDir, "b-second.md"), "Second skill.");
+    writeFileSync(join(skillsDir, "a-first.md"), "First skill.");
+
+    const config = makeConfig({
+      skills: ".vesper/skills",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "sort-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    const firstIdx = content.indexOf("## a-first.md");
+    const secondIdx = content.indexOf("## b-second.md");
+    expect(firstIdx).toBeLessThan(secondIdx);
+  });
+
+  it("silently skips when skills directory does not exist", async () => {
+    const config = makeConfig({
+      skills: ".vesper/skills",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "do the task", tempDir, "no-skills-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    expect(content).toBe("do the task");
+  });
+
+  it("silently skips when skills directory is empty (no .md files)", async () => {
+    const skillsDir = join(tempDir, ".vesper", "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(join(skillsDir, "readme.txt"), "Not a markdown file.");
+
+    const config = makeConfig({
+      skills: ".vesper/skills",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "do the task", tempDir, "empty-skills-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    expect(content).toBe("do the task");
+  });
+
+  it("silently skips when skills path is a regular file", async () => {
+    writeFileSync(join(tempDir, "skills-file"), "not a directory");
+
+    const config = makeConfig({
+      skills: "skills-file",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "do the task", tempDir, "file-skills-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    expect(content).toBe("do the task");
+  });
+
+  it("skips whitespace-only skill files", async () => {
+    const skillsDir = join(tempDir, ".vesper", "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(join(skillsDir, "empty.md"), "   \n  \n  ");
+    writeFileSync(join(skillsDir, "real.md"), "Real content.");
+
+    const config = makeConfig({
+      skills: ".vesper/skills",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "empty-file-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    expect(content).toContain("## real.md");
+    expect(content).not.toContain("## empty.md");
+  });
+
+  it("composes skills + scratchpad + task correctly when both present", async () => {
+    const skillsDir = join(tempDir, ".vesper", "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(join(skillsDir, "tip.md"), "Always test first.");
+    writeFileSync(join(tempDir, "scratch.md"), "Previous context here.");
+
+    const config = makeConfig({
+      skills: ".vesper/skills",
+      scratchpad: "scratch.md",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "do work", tempDir, "both-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    // Verify ordering: [Skills] before [Previous Context] before [Task]
+    const skillsIdx = content.indexOf("[Skills]");
+    const prevIdx = content.indexOf("[Previous Context]");
+    const taskIdx = content.indexOf("[Task]");
+    expect(skillsIdx).toBeLessThan(prevIdx);
+    expect(prevIdx).toBeLessThan(taskIdx);
+    expect(content).toContain("Always test first.");
+    expect(content).toContain("Previous context here.");
+    expect(content).toContain("do work");
+  });
+
+  it("only includes non-.md files are ignored from skills directory", async () => {
+    const skillsDir = join(tempDir, ".vesper", "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(join(skillsDir, "valid.md"), "Valid skill.");
+    writeFileSync(join(skillsDir, "ignored.txt"), "Should be ignored.");
+    writeFileSync(join(skillsDir, "also-ignored.yaml"), "also: ignored");
+
+    const config = makeConfig({
+      skills: ".vesper/skills",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "filter-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    expect(content).toContain("## valid.md");
+    expect(content).not.toContain("ignored.txt");
+    expect(content).not.toContain("also-ignored.yaml");
+  });
+
+  it("scratchpad still works after isInsideCwd refactor", async () => {
+    writeFileSync(join(tempDir, "scratch.md"), "Scratchpad content.");
+
+    const config = makeConfig({
+      scratchpad: "scratch.md",
+      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "the task", tempDir, "compat-agent", stubClient);
+
+    const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+    expect(content).toContain("[Previous Context]");
+    expect(content).toContain("Scratchpad content.");
+    expect(content).toContain("[Task]\nthe task");
   });
 });
 
