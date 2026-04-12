@@ -1,4 +1,5 @@
-import { resolve, relative, sep } from "node:path";
+import { resolve, relative, sep, dirname, basename } from "node:path";
+import { realpathSync } from "node:fs";
 import { minimatch } from "minimatch";
 
 function isInsideCwd(resolvedPath: string, cwd: string): boolean {
@@ -6,16 +7,48 @@ function isInsideCwd(resolvedPath: string, cwd: string): boolean {
   return resolvedPath === cwd || resolvedPath.startsWith(normalizedCwd);
 }
 
+/**
+ * Resolve a path to its real filesystem location, following symlinks.
+ * For existing paths, uses realpathSync directly.
+ * For non-existent paths (write targets), canonicalizes the parent
+ * directory and appends the filename.
+ * Returns null if the path cannot be resolved (e.g., parent doesn't exist).
+ */
+function resolveReal(inputPath: string, cwd: string): string | null {
+  const lexical = resolve(cwd, inputPath);
+  try {
+    return realpathSync(lexical);
+  } catch {
+    // Path doesn't exist — canonicalize the parent for write targets
+    try {
+      const parent = realpathSync(dirname(lexical));
+      return resolve(parent, basename(lexical));
+    } catch {
+      // Parent doesn't exist either — deny
+      return null;
+    }
+  }
+}
+
 export function checkPathPermission(
   inputPath: string,
   cwd: string,
   allowList: string[],
 ): boolean {
-  const resolved = resolve(cwd, inputPath);
-  if (!isInsideCwd(resolved, cwd)) {
+  // First: lexical check to catch obvious escapes cheaply
+  const lexical = resolve(cwd, inputPath);
+  if (!isInsideCwd(lexical, cwd)) {
     return false;
   }
-  const rel = relative(cwd, resolved);
+
+  // Second: resolve symlinks and re-check against real cwd
+  const realCwd = realpathSync(cwd);
+  const real = resolveReal(inputPath, cwd);
+  if (real === null || !isInsideCwd(real, realCwd)) {
+    return false;
+  }
+
+  const rel = relative(realCwd, real);
   // When the path resolves to cwd itself (e.g., list_files(".")),
   // relative() returns "". Match against both "" and "." since globs
   // like "**" match "." but not the empty string.

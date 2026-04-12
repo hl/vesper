@@ -1,12 +1,34 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, symlinkSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   checkPathPermission,
   checkCommandPermission,
 } from "../src/permissions.js";
 
-const cwd = "/project";
-
 describe("checkPathPermission", () => {
+  let cwd: string;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "vesper-perm-cwd-"));
+    mkdirSync(join(cwd, "src"), { recursive: true });
+    mkdirSync(join(cwd, "tmp"), { recursive: true });
+    mkdirSync(join(cwd, "secrets"), { recursive: true });
+    mkdirSync(join(cwd, "deep", "nested"), { recursive: true });
+    writeFileSync(join(cwd, "src", "index.ts"), "");
+    mkdirSync(join(cwd, "src", "lib"), { recursive: true });
+    writeFileSync(join(cwd, "src", "lib", "utils.ts"), "");
+    writeFileSync(join(cwd, "tmp", "cache.json"), "");
+    writeFileSync(join(cwd, "secrets", "key.pem"), "");
+    writeFileSync(join(cwd, "README.md"), "");
+    writeFileSync(join(cwd, "deep", "nested", "file.ts"), "");
+  });
+
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
   it("permits a path matching a glob in the read list", () => {
     expect(checkPathPermission("src/index.ts", cwd, ["src/**"])).toBe(true);
   });
@@ -49,6 +71,33 @@ describe("checkPathPermission", () => {
 
   it("denies listing cwd root when glob does not match", () => {
     expect(checkPathPermission(".", cwd, ["src/**"])).toBe(false);
+  });
+});
+
+describe("checkPathPermission — symlink escape", () => {
+  let cwd: string;
+  let outsideDir: string;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "vesper-perm-"));
+    outsideDir = mkdtempSync(join(tmpdir(), "vesper-outside-"));
+    writeFileSync(join(outsideDir, "secret.txt"), "sensitive data");
+    mkdirSync(join(cwd, "src"), { recursive: true });
+    symlinkSync(outsideDir, join(cwd, "src", "escape-link"));
+  });
+
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it("denies a symlink inside cwd that points outside cwd", () => {
+    expect(checkPathPermission("src/escape-link/secret.txt", cwd, ["**"])).toBe(false);
+  });
+
+  it("permits a regular file inside cwd", () => {
+    writeFileSync(join(cwd, "src", "real.txt"), "ok");
+    expect(checkPathPermission("src/real.txt", cwd, ["**"])).toBe(true);
   });
 });
 

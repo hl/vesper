@@ -1,20 +1,33 @@
-import { join } from "node:path";
+import { resolve, sep } from "node:path";
+import { VesperError } from "./errors.js";
 
-export interface SignalPaths {
+function resolveSignalPath(cwd: string, name: string): string {
+  const resolved = resolve(cwd, name);
+  const normalizedCwd = cwd.endsWith(sep) ? cwd : cwd + sep;
+  if (resolved !== cwd && !resolved.startsWith(normalizedCwd)) {
+    throw new VesperError(
+      `Signal file path "${name}" resolves outside cwd: ${resolved}`,
+      1,
+    );
+  }
+  return resolved;
+}
+
+interface SignalPaths {
   complete: string;
   needsApproval: string;
   failed: string;
 }
 
-export function getSignalPaths(cwd: string): SignalPaths {
+function getSignalPaths(cwd: string): SignalPaths {
   const complete = process.env.VESPER_SIGNAL_COMPLETE ?? ".vesper-complete";
   const needsApproval = process.env.VESPER_SIGNAL_NEEDS_APPROVAL ?? ".vesper-needs-approval";
   const failed = process.env.VESPER_SIGNAL_FAILED ?? ".vesper-failed";
 
   return {
-    complete: join(cwd, complete),
-    needsApproval: join(cwd, needsApproval),
-    failed: join(cwd, failed),
+    complete: resolveSignalPath(cwd, complete),
+    needsApproval: resolveSignalPath(cwd, needsApproval),
+    failed: resolveSignalPath(cwd, failed),
   };
 }
 

@@ -3,11 +3,11 @@ import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  getSignalPaths,
   writeComplete,
   writeNeedsApproval,
   writeFailed,
 } from "../src/signals.js";
+import { VesperError } from "../src/errors.js";
 
 describe("signals", () => {
   let tempDir: string;
@@ -39,23 +39,26 @@ describe("signals", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  describe("getSignalPaths", () => {
-    it("falls back to defaults when environment variables are not set", () => {
-      const paths = getSignalPaths(tempDir);
-      expect(paths.complete).toBe(join(tempDir, ".vesper-complete"));
-      expect(paths.needsApproval).toBe(join(tempDir, ".vesper-needs-approval"));
-      expect(paths.failed).toBe(join(tempDir, ".vesper-failed"));
+  describe("signal path defaults and overrides", () => {
+    it("uses default signal file names when env vars are not set", async () => {
+      await writeComplete(tempDir);
+      expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
     });
 
-    it("reads signal file names from environment variables", () => {
+    it("reads signal file names from environment variables", async () => {
       process.env.VESPER_SIGNAL_COMPLETE = "done.sig";
-      process.env.VESPER_SIGNAL_NEEDS_APPROVAL = "approval.sig";
-      process.env.VESPER_SIGNAL_FAILED = "fail.sig";
+      await writeComplete(tempDir);
+      expect(existsSync(join(tempDir, "done.sig"))).toBe(true);
+    });
 
-      const paths = getSignalPaths(tempDir);
-      expect(paths.complete).toBe(join(tempDir, "done.sig"));
-      expect(paths.needsApproval).toBe(join(tempDir, "approval.sig"));
-      expect(paths.failed).toBe(join(tempDir, "fail.sig"));
+    it("rejects signal paths that traverse outside cwd", () => {
+      process.env.VESPER_SIGNAL_FAILED = "../../etc/cron.d/backdoor";
+      expect(writeFailed(tempDir, "agent", "error", "fail")).rejects.toThrow(VesperError);
+    });
+
+    it("rejects absolute signal paths", () => {
+      process.env.VESPER_SIGNAL_COMPLETE = "/tmp/evil";
+      expect(writeComplete(tempDir)).rejects.toThrow(VesperError);
     });
   });
 

@@ -8,6 +8,7 @@ import { readFile, listFiles, writeFile, patchFile, deleteFile, runCommand } fro
 
 const MODEL = "claude-sonnet-4-5-20250514";
 const MAX_OUTPUT_TOKENS = 4096;
+const MAX_ITERATIONS = 1000;
 
 const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
@@ -207,10 +208,12 @@ export async function runAgent(
 
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let iterationCount = 0;
 
   // Iteration loop — each iteration is a fresh API conversation.
   // Context does not accumulate across iterations (by design).
-  while (true) {
+  while (iterationCount < MAX_ITERATIONS) {
+    iterationCount++;
     let messages: Anthropic.MessageParam[] = [
       { role: "user", content: taskPrompt },
     ];
@@ -293,4 +296,18 @@ export async function runAgent(
 
     // "continue" — next iteration
   }
+
+  // Max iterations reached — treat as completion for agents without watch_file,
+  // or as failure for agents that should have completed.
+  if (config.completion.watch_file === null) {
+    await writeComplete(cwd);
+    return { exitCode: 0 };
+  }
+  await writeFailed(
+    cwd,
+    agentName,
+    "error",
+    `Maximum iteration limit (${MAX_ITERATIONS}) reached without completion.`,
+  );
+  return { exitCode: 1 };
 }
