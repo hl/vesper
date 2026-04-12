@@ -3,6 +3,7 @@ import { runAgent } from "./agent.js";
 import { CompletionTracker } from "./completion.js";
 import { type AgentConfig, loadConfig, resolveAgent } from "./config.js";
 import { exitWithError, VesperError } from "./errors.js";
+import { init } from "./init.js";
 import { checkStaleSignals, getSignalPaths, writeComplete, writeFailed } from "./signals.js";
 import { VERSION } from "./version.js";
 
@@ -17,6 +18,8 @@ interface ParsedRunArgs {
 interface ParsedInitArgs {
   _: string[];
   cwd: string;
+  force: boolean;
+  global: boolean;
 }
 
 type ParsedArgs = ParsedRunArgs | ParsedInitArgs;
@@ -38,7 +41,19 @@ export function buildParser(argv: Argv): Argv {
         describe: "Name of the agent to run",
       }),
     )
-    .command("init", "Scaffold a .vesper/ project directory", (y: Argv) => y)
+    .command("init", "Scaffold a .vesper/ project directory", (y: Argv) =>
+      y
+        .option("force", {
+          type: "boolean",
+          default: false,
+          describe: "Overwrite existing example files",
+        })
+        .option("global", {
+          type: "boolean",
+          default: false,
+          describe: "Scaffold ~/.config/vesper/ instead of .vesper/",
+        }),
+    )
     .command("$0 [agent]", false, (y: Argv) =>
       y.positional("agent", {
         type: "string",
@@ -144,8 +159,15 @@ async function main(): Promise<void> {
   if (command === "run") {
     await handleRun((argv as ParsedRunArgs).agent, cwd);
   } else if (command === "init") {
-    process.stderr.write("[vesper] vesper init is not yet implemented\n");
-    process.exit(1);
+    const initArgs = argv as ParsedInitArgs;
+    try {
+      await init({ force: initArgs.force, global: initArgs.global, cwd: cwd });
+    } catch (err) {
+      if (err instanceof VesperError) {
+        exitWithError(err.message, err.code);
+      }
+      throw err;
+    }
   } else if ("agent" in argv && argv.agent) {
     // Default command: vesper <agent> alias
     await handleRun(argv.agent, cwd);
