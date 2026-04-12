@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install
+
+      - name: Quality gates
+        run: make check
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          declare -A TARGETS=(
+            ["darwin_arm64"]="bun-darwin-arm64"
+            ["darwin_x64"]="bun-darwin-x64"
+            ["linux_arm64"]="bun-linux-arm64"
+            ["linux_x64"]="bun-linux-x64"
+          )
+
+          mkdir -p dist
+          for key in "${!TARGETS[@]}"; do
+            target="${TARGETS[$key]}"
+            echo "Building for $target..."
+            bun build src/index.ts --compile \
+              --target="$target" \
+              --define "VESPER_VERSION='$VERSION'" \
+              --outfile "dist/vesper"
+
+            tar -czf "dist/vesper_${key}.tar.gz" -C dist vesper
+            rm dist/vesper
+          done
+
+      - name: Compute SHA256
+        id: sha
+        working-directory: dist
+        run: |
+          for f in *.tar.gz; do
+            name="${f%.tar.gz}"
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            echo "${name}_sha256=$sha" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          SHA_DARWIN_ARM64="${{ steps.sha.outputs.vesper_darwin_arm64_sha256 }}"
+          SHA_DARWIN_X64="${{ steps.sha.outputs.vesper_darwin_x64_sha256 }}"
+          SHA_LINUX_ARM64="${{ steps.sha.outputs.vesper_linux_arm64_sha256 }}"
+          SHA_LINUX_X64="${{ steps.sha.outputs.vesper_linux_x64_sha256 }}"
+
+          cat > /tmp/vesper.rb << FORMULA
+          class Vesper < Formula
+            desc "Permission-gated AI agent runtime"
+            homepage "https://github.com/hl/vesper"
+            version "$VERSION"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/hl/vesper/releases/download/v#{version}/vesper_darwin_arm64.tar.gz"
+                sha256 "$SHA_DARWIN_ARM64"
+              end
+              on_intel do
+                url "https://github.com/hl/vesper/releases/download/v#{version}/vesper_darwin_x64.tar.gz"
+                sha256 "$SHA_DARWIN_X64"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/hl/vesper/releases/download/v#{version}/vesper_linux_arm64.tar.gz"
+                sha256 "$SHA_LINUX_ARM64"
+              end
+              on_intel do
+                url "https://github.com/hl/vesper/releases/download/v#{version}/vesper_linux_x64.tar.gz"
+                sha256 "$SHA_LINUX_X64"
+              end
+            end
+
+            def install
+              bin.install "vesper"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/vesper --version")
+            end
+          end
+          FORMULA
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/hl/homebrew-tap.git" /tmp/homebrew-tap
+          mkdir -p /tmp/homebrew-tap/Formula
+          cp /tmp/vesper.rb /tmp/homebrew-tap/Formula/vesper.rb
+          cd /tmp/homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/vesper.rb
+          git commit -m "vesper $VERSION"
+          git push
