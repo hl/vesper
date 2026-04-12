@@ -1,164 +1,97 @@
 # Vesper
 
-A CLI binary that loads named agent personas and runs them against the Anthropic API with structural permission enforcement.
-
-Safety boundaries are structural, not instructional. An agent cannot exceed its permitted tool surface regardless of what the LLM reasons or decides.
+A permission-gated AI agent runtime. Single binary, structural safety — agents cannot exceed their permitted tool surface regardless of what the LLM reasons or decides.
 
 ## Install
 
-Requires [Bun](https://bun.sh) (latest stable).
+```sh
+brew install hl/tap/vesper
+```
+
+Or build from source (requires [Bun](https://bun.sh)):
 
 ```sh
 bun install
 make build
 ```
 
-Produces a single native binary named `vesper`.
-
-## Usage
+## Quick Start
 
 ```sh
-echo "Implement the feature described in docs/specs/auth.md" | vesper builder
-cat prompts/build.md | vesper builder --cwd ./backend
+vesper init
 ```
 
-The task prompt is read from stdin. The binary blocks until stdin is closed.
+This scaffolds a `.vesper/` directory with an example agent config and system prompt. Copy and edit them to create your own agent:
 
-## Agent Definition
-
-Each agent is defined by two files in `.vesper/agents/` (or `~/.config/vesper/`):
-
-**`<agent>.yml`** — structural constraints:
-
-```yaml
-system_prompt: builder.md
-token_budget: 100000
-model: claude-sonnet-4-5-20250514  # optional, default: claude-sonnet-4-5-20250514
-log_denied_calls: false
-log_events: false
-reveal_permissions: false
-command_timeout: 30                # seconds, default: 30
-command_env: []                    # extra env vars for commands, default: []
-max_tool_result_size: 102400       # bytes, default: 100KB
-scratchpad: .vesper/.scratchpad-builder.md     # optional
-skills: .vesper/skills                        # optional, directory of .md skill files
-
-signals:
-  complete: ".vesper-complete"
-  needs_approval: ".vesper-needs-approval"
-  failed: ".vesper-failed"
-
-tools:
-  read:
-    - "src/**"
-    - "docs/**"
-  write:
-    - "src/**"
-    - "test/**"
-  delete:
-    - "src/**"
-  commands:
-    - "git commit"
-    - "mix test"
-
-completion:
-  watch_file: "docs/plans/task-queue.md"
-  no_progress_limit: 3
+```sh
+cp .vesper/agents/example.yml .vesper/agents/builder.yml
+cp .vesper/system_prompts/example.md .vesper/system_prompts/builder.md
 ```
 
-**`<agent>.md`** — system prompt, passed verbatim to the API.
+Then run:
 
-## Config Resolution
-
-1. `<cwd>/.vesper/agents/<agent>.yml` + `<cwd>/.vesper/agents/<agent>.md`
-2. `~/.config/vesper/<agent>.yml` + `~/.config/vesper/<agent>.md`
-
-Both files must exist at the same location.
-
-## Permission Model
-
-All permissions are allow-lists enforced by the runtime before any tool result reaches the LLM.
-
-- **File operations** — glob patterns matched via minimatch. Paths resolving outside `cwd` are always denied. Symlinks are resolved via `realpathSync` before matching.
-- **Commands** — single-token entries (`mix`) match the binary with any arguments. Two-token entries (`mix test`) match binary + first argument.
-- **Denial** — returns `{ error: "permission_denied" }` by default. Set `reveal_permissions: true` for structured denial messages with the tool name, target path, and allowed patterns.
-
-## Tools
-
-| Tool | Description |
-|------|-------------|
-| `read_file` | Read a file (gated by `tools.read`) |
-| `list_files` | List a directory (gated by `tools.read`) |
-| `write_file` | Write/create a file (gated by `tools.write`) |
-| `patch_file` | Apply a unified diff (gated by `tools.write`) |
-| `delete_file` | Delete a file (gated by `tools.delete`) |
-| `run_command` | Run a shell command (gated by `tools.commands`) |
-
-## Completion Model
-
-- **Watch file configured** — empty or missing file means complete. Line count unchanged for `no_progress_limit` iterations means failed.
-- **No watch file** — agent runs until token budget or max iterations (1000), then writes complete signal.
-
-## Signal Files
-
-Signal files communicate status to the caller. Names are configured in the agent YAML:
-
-```yaml
-signals:
-  complete: ".vesper-complete"        # default
-  needs_approval: ".vesper-needs-approval"  # default
-  failed: ".vesper-failed"            # default
+```sh
+echo "Implement the auth module" | vesper run builder
 ```
 
-| Signal | Default | Purpose |
-|--------|---------|---------|
-| `complete` | `.vesper-complete` | Clean completion (empty file) |
-| `needs_approval` | `.vesper-needs-approval` | Token budget exhausted (JSON) |
-| `failed` | `.vesper-failed` | Error or no progress (JSON) |
+The task prompt is read from stdin. `vesper <agent>` also works as a shorthand for `vesper run <agent>`.
 
-**Stale signal check:** The binary refuses to start (exit 1) if any signal file from a prior run still exists. The caller is responsible for cleaning up signal files between runs.
+## Agent Configuration
 
-## Command Environment
+Each agent is defined by a YAML config in `.vesper/agents/` and a system prompt in `.vesper/system_prompts/`. The `system_prompt` path is relative to `.vesper/`.
 
-By default, `run_command` passes only `PATH`, `HOME`, `USER`, `LANG`, `TERM`, and `TMPDIR` to child processes. Use `command_env` to pass additional env vars:
+See the example config scaffolded by `vesper init` for all available keys with comments, or the [builder config](.vesper/agents/builder.yml) for a real-world example.
 
-```yaml
-command_env: ["DATABASE_URL", "NODE_ENV"]
+**Required keys:** `system_prompt`, `token_budget`, `tools`, `completion`.
+
+## Directory Structure
+
+```
+.vesper/
+  agents/            # Agent YAML configs (<name>.yml)
+  system_prompts/    # System prompt Markdown files
+  skills/            # Skill .md files injected at startup
+  memories/          # Agent-written memory files
+  CLAUDE.md          # Agent-facing guide to project conventions
 ```
 
-This prevents accidental secret exfiltration (e.g., `ANTHROPIC_API_KEY`) via command output.
+Global agents at `~/.config/vesper/` follow the same layout. Local agents take priority.
 
-## Tool Result Truncation
+## Concepts
 
-Tool results exceeding `max_tool_result_size` (default 100KB) are truncated with a notice appended. Configurable per agent:
+**Tools** — Six tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command`. Each gated by glob patterns in the agent config.
 
-```yaml
-max_tool_result_size: 204800  # 200KB
-```
+**Permissions** — Allow-list only. File paths are resolved through symlinks via `realpathSync`. Commands match binary name, optionally with first argument. Agents with no permissions for a tool category never see that tool in the API call.
 
-## Observability
+**Skills** — Markdown files in a configured directory, injected into every iteration as read-only context. Set `skills: ".vesper/skills"` in the agent config.
 
-Set `log_events: true` in the agent config to emit JSONL events to stderr:
+**Scratchpad** — A file the agent reads at the start of each iteration and writes to during execution. Persists state across iterations without conversation carry-forward.
 
-- `iteration_start` — iteration number
-- `api_call` — model, tokens, latency
-- `tool_call` — tool name, target, permitted/denied, duration
-- `completion_check` — status
-- `signal_write` — signal type, path
+**Completion** — Watch file mode: empty/missing = complete, stable line count = no progress. No watch file: runs to token budget.
 
-Each line includes a `run_id` (UUID) and ISO 8601 `timestamp`.
-
-## Scratchpad
-
-Set `scratchpad: <path>` in the agent config. The runtime reads the file at the start of each iteration and injects its contents before the task prompt as a `[Previous Context]` block. The agent writes to the scratchpad via normal `write_file` calls. The runtime never writes it.
+**Signals** — `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`. Configurable names. The binary refuses to start if stale signals exist.
 
 ## Built-in Agents
 
-| Agent | Role | Watch file |
-|-------|------|------------|
-| `planner` | Processes spec queue, produces task queue | `docs/plans/spec-queue.md` |
-| `builder` | Implements tasks from the queue | `docs/plans/task-queue.md` |
-| `reviewer` | Reviews implementation, writes report | None (runs to limit) |
+This repo ships four example agents you can copy and adapt:
+
+| Agent | Role |
+|-------|------|
+| `builder` | Implements tasks from a queue |
+| `planner` | Processes specs, produces task queues |
+| `reviewer` | Reviews implementation, writes reports |
+| `scribe` | Documents learnings after plan execution |
+
+## CLI Reference
+
+```
+vesper run <agent>    Run a named agent (reads task from stdin)
+vesper init           Scaffold .vesper/ directory
+vesper init --global  Scaffold ~/.config/vesper/ for shared agents
+vesper init --force   Overwrite existing example files
+vesper --version      Print version
+vesper --help         Show help
+```
 
 ## Development
 
@@ -166,7 +99,5 @@ Set `scratchpad: <path>` in the agent config. The runtime reads the file at the 
 make check      # typecheck + lint + test
 make build      # compile binary
 make test       # run tests only
-make typecheck  # type-check only
-make lint       # lint only
 make format     # auto-format
 ```
