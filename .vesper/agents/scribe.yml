@@ -1,0 +1,23 @@
+system_prompt: scribe.md
+token_budget: 100000
+log_denied_calls: false
+log_events: false
+skills: ".vesper/skills"
+
+signals:
+  complete: ".vesper-complete"
+  needs_approval: ".vesper-needs-approval"
+  failed: ".vesper-failed"
+
+tools:
+  read:
+    - "**"
+  write:
+    - ".vesper/memories/**"
+    - ".vesper/skills/**"
+  delete: []
+  commands: []
+
+completion:
+  watch_file: ~
+  no_progress_limit: 3
