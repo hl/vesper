@@ -1,4 +1,4 @@
-import { readdir, mkdir, unlink } from "node:fs/promises";
+import { mkdir, readdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { applyPatch } from "diff";
 
@@ -31,10 +31,7 @@ export async function listFiles(
   }
 }
 
-export async function writeFile(
-  resolvedPath: string,
-  content: string,
-): Promise<{ ok: true }> {
+export async function writeFile(resolvedPath: string, content: string): Promise<{ ok: true }> {
   await mkdir(dirname(resolvedPath), { recursive: true });
   await Bun.write(resolvedPath, content);
   return { ok: true };

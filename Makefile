@@ -15,4 +15,4 @@ test:
 	bun test
 
 typecheck:
-	bun tsc --noEmit
+	bunx tsc --noEmit

@@ -1,5 +1,5 @@
-import { resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { VesperError } from "./errors.js";
 
 function resolveSignalPath(cwd: string, name: string): string {
@@ -12,10 +12,7 @@ function resolveSignalPath(cwd: string, name: string): string {
   const resolved = resolve(realCwd, name);
   const normalizedCwd = realCwd.endsWith(sep) ? realCwd : realCwd + sep;
   if (resolved !== realCwd && !resolved.startsWith(normalizedCwd)) {
-    throw new VesperError(
-      `Signal file path "${name}" resolves outside cwd: ${resolved}`,
-      1,
-    );
+    throw new VesperError(`Signal file path "${name}" resolves outside cwd: ${resolved}`, 1);
   }
   return resolved;
 }

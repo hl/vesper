@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
+import { executeTool, type MessageClient, runAgent } from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
-import { runAgent, executeTool, type MessageClient } from "../src/agent.js";
 
 // ---------------------------------------------------------------------------
 // Factories
@@ -192,9 +192,7 @@ describe("runAgent", () => {
           // First call: model wants to use a tool. Usage within budget.
           return makeMessage({
             stop_reason: "tool_use",
-            content: [
-              makeToolUseBlock("read_file", { path: "hello.txt" }, "toolu_1"),
-            ],
+            content: [makeToolUseBlock("read_file", { path: "hello.txt" }, "toolu_1")],
             usage: { input_tokens: 100, output_tokens: 50 },
           });
         }
@@ -210,7 +208,14 @@ describe("runAgent", () => {
     // Create the file the tool will read so executeTool succeeds
     writeFileSync(join(tempDir, "hello.txt"), "hello world");
 
-    const result = await runAgent(config, "system", "task", tempDir, "mid-budget-agent", stubClient);
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "mid-budget-agent",
+      stubClient,
+    );
 
     expect(result.exitCode).toBe(0);
     expect(callCount).toBe(2);
@@ -261,9 +266,7 @@ describe("runAgent", () => {
         if (callCount === 1) {
           return makeMessage({
             stop_reason: "tool_use",
-            content: [
-              makeToolUseBlock("read_file", { path: "data.txt" }, "toolu_read"),
-            ],
+            content: [makeToolUseBlock("read_file", { path: "data.txt" }, "toolu_read")],
             usage: { input_tokens: 50, output_tokens: 30 },
           });
         }
@@ -310,7 +313,11 @@ describe("runAgent", () => {
           return makeMessage({
             stop_reason: "tool_use",
             content: [
-              makeToolUseBlock("write_file", { path: "secrets.env", content: "bad" }, "toolu_write"),
+              makeToolUseBlock(
+                "write_file",
+                { path: "secrets.env", content: "bad" },
+                "toolu_write",
+              ),
             ],
             usage: { input_tokens: 50, output_tokens: 30 },
           });
@@ -353,9 +360,7 @@ describe("runAgent", () => {
         if (callCount === 1) {
           return makeMessage({
             stop_reason: "tool_use",
-            content: [
-              makeToolUseBlock("hack_system", { target: "root" }, "toolu_hack"),
-            ],
+            content: [makeToolUseBlock("hack_system", { target: "root" }, "toolu_hack")],
             usage: { input_tokens: 50, output_tokens: 30 },
           });
         }

@@ -1,11 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, symlinkSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import {
-  checkPathPermission,
-  checkCommandPermission,
-} from "../src/permissions.js";
+import { join } from "node:path";
+import { checkCommandPermission, checkPathPermission } from "../src/permissions.js";
 
 describe("checkPathPermission", () => {
   let cwd: string;

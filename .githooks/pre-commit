@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Running quality gates..."
+
+echo "--- Typecheck"
+bunx tsc --noEmit
+
+echo "--- Lint + format check"
+bunx biome check .
+
+echo "--- Tests"
+bun test
+
+echo "==> All quality gates passed."

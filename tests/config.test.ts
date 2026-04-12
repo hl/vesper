@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolveAgent, loadConfig } from "../src/config.js";
+import { join } from "node:path";
+import { loadConfig, resolveAgent } from "../src/config.js";
 import { VesperError } from "../src/errors.js";
 
 describe("resolveAgent", () => {
@@ -27,11 +27,7 @@ describe("resolveAgent", () => {
     writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: prompt.md\n");
     writeFileSync(join(cwdVesper, "myagent.md"), "# Prompt\n");
 
-    const result = resolveAgent(
-      "myagent",
-      join(tempDir, "project"),
-      fakeHome,
-    );
+    const result = resolveAgent("myagent", join(tempDir, "project"), fakeHome);
 
     expect(result.configPath).toBe(join(cwdVesper, "myagent.yml"));
     expect(result.promptPath).toBe(join(cwdVesper, "myagent.md"));
@@ -43,11 +39,7 @@ describe("resolveAgent", () => {
     writeFileSync(join(homeVesper, "myagent.yml"), "system_prompt: prompt.md\n");
     writeFileSync(join(homeVesper, "myagent.md"), "# Prompt\n");
 
-    const result = resolveAgent(
-      "myagent",
-      join(tempDir, "project"),
-      fakeHome,
-    );
+    const result = resolveAgent("myagent", join(tempDir, "project"), fakeHome);
 
     expect(result.configPath).toBe(join(homeVesper, "myagent.yml"));
     expect(result.promptPath).toBe(join(homeVesper, "myagent.md"));
@@ -63,11 +55,7 @@ describe("resolveAgent", () => {
     writeFileSync(join(homeVesper, "myagent.yml"), "system_prompt: prompt.md\n");
     writeFileSync(join(homeVesper, "myagent.md"), "# Home Prompt\n");
 
-    const result = resolveAgent(
-      "myagent",
-      join(tempDir, "project"),
-      fakeHome,
-    );
+    const result = resolveAgent("myagent", join(tempDir, "project"), fakeHome);
 
     expect(result.configPath).toBe(join(cwdVesper, "myagent.yml"));
   });
@@ -76,9 +64,7 @@ describe("resolveAgent", () => {
     mkdirSync(cwdVesper, { recursive: true });
     writeFileSync(join(cwdVesper, "myagent.yml"), "system_prompt: prompt.md\n");
 
-    expect(() =>
-      resolveAgent("myagent", join(tempDir, "project"), fakeHome),
-    ).toThrow(VesperError);
+    expect(() => resolveAgent("myagent", join(tempDir, "project"), fakeHome)).toThrow(VesperError);
 
     try {
       resolveAgent("myagent", join(tempDir, "project"), fakeHome);
@@ -93,9 +79,7 @@ describe("resolveAgent", () => {
     mkdirSync(cwdVesper, { recursive: true });
     writeFileSync(join(cwdVesper, "myagent.md"), "# Prompt\n");
 
-    expect(() =>
-      resolveAgent("myagent", join(tempDir, "project"), fakeHome),
-    ).toThrow(VesperError);
+    expect(() => resolveAgent("myagent", join(tempDir, "project"), fakeHome)).toThrow(VesperError);
 
     try {
       resolveAgent("myagent", join(tempDir, "project"), fakeHome);
@@ -107,9 +91,9 @@ describe("resolveAgent", () => {
   });
 
   it("exits with code 1 when agent is not found in any location", () => {
-    expect(() =>
-      resolveAgent("nonexistent", join(tempDir, "project"), fakeHome),
-    ).toThrow(VesperError);
+    expect(() => resolveAgent("nonexistent", join(tempDir, "project"), fakeHome)).toThrow(
+      VesperError,
+    );
 
     try {
       resolveAgent("nonexistent", join(tempDir, "project"), fakeHome);

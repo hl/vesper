@@ -1,5 +1,5 @@
-import { resolve, relative, sep, dirname, basename } from "node:path";
 import { realpathSync } from "node:fs";
+import { basename, dirname, relative, resolve, sep } from "node:path";
 import { minimatch } from "minimatch";
 
 function isInsideCwd(resolvedPath: string, cwd: string): boolean {
@@ -30,11 +30,7 @@ function resolveReal(inputPath: string, cwd: string): string | null {
   }
 }
 
-export function checkPathPermission(
-  inputPath: string,
-  cwd: string,
-  allowList: string[],
-): boolean {
+export function checkPathPermission(inputPath: string, cwd: string, allowList: string[]): boolean {
   // First: lexical check to catch obvious escapes cheaply
   const lexical = resolve(cwd, inputPath);
   if (!isInsideCwd(lexical, cwd)) {

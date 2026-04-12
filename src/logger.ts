@@ -31,12 +31,7 @@ export class Logger {
     });
   }
 
-  toolCall(
-    tool: string,
-    target: string,
-    permitted: boolean,
-    durationMs: number,
-  ): void {
+  toolCall(tool: string, target: string, permitted: boolean, durationMs: number): void {
     this.emit("tool_call", { tool, target, permitted, duration_ms: durationMs });
   }
 

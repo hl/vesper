@@ -1,13 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import {
-  writeComplete,
-  writeNeedsApproval,
-  writeFailed,
-} from "../src/signals.js";
+import { join } from "node:path";
 import { VesperError } from "../src/errors.js";
+import { writeComplete, writeFailed, writeNeedsApproval } from "../src/signals.js";
 
 describe("signals", () => {
   let tempDir: string;

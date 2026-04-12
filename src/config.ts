@@ -1,6 +1,6 @@
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { load as yamlLoad } from "js-yaml";
 import { VesperError } from "./errors.js";
 
@@ -31,16 +31,9 @@ export interface ResolvedAgent {
   configDir: string;
 }
 
-export function resolveAgent(
-  name: string,
-  cwd: string,
-  home?: string,
-): ResolvedAgent {
+export function resolveAgent(name: string, cwd: string, home?: string): ResolvedAgent {
   const homeDir = home ?? homedir();
-  const locations = [
-    join(cwd, ".vesper"),
-    join(homeDir, ".config", "vesper"),
-  ];
+  const locations = [join(cwd, ".vesper"), join(homeDir, ".config", "vesper")];
 
   for (const dir of locations) {
     const ymlPath = join(dir, `${name}.yml`);
@@ -53,39 +46,24 @@ export function resolveAgent(
     }
 
     if (ymlExists && !mdExists) {
-      throw new VesperError(
-        `Found ${ymlPath} but missing ${mdPath}`,
-        1,
-      );
+      throw new VesperError(`Found ${ymlPath} but missing ${mdPath}`, 1);
     }
 
     if (!ymlExists && mdExists) {
-      throw new VesperError(
-        `Found ${mdPath} but missing ${ymlPath}`,
-        1,
-      );
+      throw new VesperError(`Found ${mdPath} but missing ${ymlPath}`, 1);
     }
   }
 
-  throw new VesperError(
-    `Agent "${name}" not found in ${locations.join(" or ")}`,
-    1,
-  );
+  throw new VesperError(`Agent "${name}" not found in ${locations.join(" or ")}`, 1);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function assertStringArray(
-  value: unknown,
-  fieldName: string,
-): asserts value is string[] {
+function assertStringArray(value: unknown, fieldName: string): asserts value is string[] {
   if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
-    throw new VesperError(
-      `"${fieldName}" must be an array of strings`,
-      1,
-    );
+    throw new VesperError(`"${fieldName}" must be an array of strings`, 1);
   }
 }
 
@@ -102,48 +80,30 @@ export function loadConfig(configPath: string): AgentConfig {
   const parsed = yamlLoad(raw);
 
   if (!isPlainObject(parsed)) {
-    throw new VesperError(
-      `Config file ${configPath} must be a YAML mapping`,
-      1,
-    );
+    throw new VesperError(`Config file ${configPath} must be a YAML mapping`, 1);
   }
 
   // Required: system_prompt
   if (!("system_prompt" in parsed) || typeof parsed.system_prompt !== "string") {
-    throw new VesperError(
-      `Missing or invalid required key "system_prompt" in ${configPath}`,
-      1,
-    );
+    throw new VesperError(`Missing or invalid required key "system_prompt" in ${configPath}`, 1);
   }
 
   // Required: token_budget
   if (!("token_budget" in parsed) || typeof parsed.token_budget !== "number") {
-    throw new VesperError(
-      `Missing or invalid required key "token_budget" in ${configPath}`,
-      1,
-    );
+    throw new VesperError(`Missing or invalid required key "token_budget" in ${configPath}`, 1);
   }
   if (parsed.token_budget <= 0) {
-    throw new VesperError(
-      `"token_budget" must be a positive number in ${configPath}`,
-      1,
-    );
+    throw new VesperError(`"token_budget" must be a positive number in ${configPath}`, 1);
   }
 
   // Required: tools
   if (!("tools" in parsed) || !isPlainObject(parsed.tools)) {
-    throw new VesperError(
-      `Missing or invalid required key "tools" in ${configPath}`,
-      1,
-    );
+    throw new VesperError(`Missing or invalid required key "tools" in ${configPath}`, 1);
   }
 
   // Required: completion
   if (!("completion" in parsed) || !isPlainObject(parsed.completion)) {
-    throw new VesperError(
-      `Missing or invalid required key "completion" in ${configPath}`,
-      1,
-    );
+    throw new VesperError(`Missing or invalid required key "completion" in ${configPath}`, 1);
   }
 
   const tools = parsed.tools;
@@ -163,18 +123,12 @@ export function loadConfig(configPath: string): AgentConfig {
   // Validate completion fields if present
   const watchFile = completion.watch_file ?? null;
   if (watchFile !== null && typeof watchFile !== "string") {
-    throw new VesperError(
-      `"completion.watch_file" must be a string or null`,
-      1,
-    );
+    throw new VesperError(`"completion.watch_file" must be a string or null`, 1);
   }
 
   const noProgressLimit = completion.no_progress_limit ?? 3;
   if (typeof noProgressLimit !== "number") {
-    throw new VesperError(
-      `"completion.no_progress_limit" must be a number`,
-      1,
-    );
+    throw new VesperError(`"completion.no_progress_limit" must be a number`, 1);
   }
 
   // Optional v0.2 fields
@@ -196,16 +150,12 @@ export function loadConfig(configPath: string): AgentConfig {
   return {
     system_prompt: parsed.system_prompt,
     token_budget: parsed.token_budget,
-    log_denied_calls: typeof parsed.log_denied_calls === "boolean"
-      ? parsed.log_denied_calls
-      : false,
+    log_denied_calls:
+      typeof parsed.log_denied_calls === "boolean" ? parsed.log_denied_calls : false,
     model: typeof model === "string" ? model : undefined,
-    reveal_permissions: typeof parsed.reveal_permissions === "boolean"
-      ? parsed.reveal_permissions
-      : false,
-    log_events: typeof parsed.log_events === "boolean"
-      ? parsed.log_events
-      : false,
+    reveal_permissions:
+      typeof parsed.reveal_permissions === "boolean" ? parsed.reveal_permissions : false,
+    log_events: typeof parsed.log_events === "boolean" ? parsed.log_events : false,
     command_timeout: commandTimeout,
     scratchpad,
     tools: {

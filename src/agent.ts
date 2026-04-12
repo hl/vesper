@@ -1,12 +1,12 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
-import type { AgentConfig } from "./config.js";
+import { resolve, sep } from "node:path";
+import Anthropic from "@anthropic-ai/sdk";
 import { CompletionTracker } from "./completion.js";
-import { checkPathPermission, checkCommandPermission, logDeniedCall } from "./permissions.js";
-import { writeComplete, writeNeedsApproval, writeFailed, getSignalPaths } from "./signals.js";
-import { readFile, listFiles, writeFile, patchFile, deleteFile, runCommand } from "./tools.js";
+import type { AgentConfig } from "./config.js";
 import { Logger } from "./logger.js";
+import { checkCommandPermission, checkPathPermission, logDeniedCall } from "./permissions.js";
+import { getSignalPaths, writeComplete, writeFailed, writeNeedsApproval } from "./signals.js";
+import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } from "./tools.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250514";
 const MAX_OUTPUT_TOKENS = 4096;
@@ -27,7 +27,8 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
   {
     name: "list_files",
-    description: "List the contents of a directory at the given path relative to the working directory.",
+    description:
+      "List the contents of a directory at the given path relative to the working directory.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -39,7 +40,8 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
   {
     name: "write_file",
-    description: "Write content to a file at the given path, creating intermediate directories as needed.",
+    description:
+      "Write content to a file at the given path, creating intermediate directories as needed.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -130,7 +132,10 @@ function validateStringArray(input: Record<string, unknown>, field: string): str
 function getPermissionList(
   toolName: string,
   config: AgentConfig,
-): { type: "path"; operation: "read" | "write" | "delete"; list: string[] } | { type: "command" } | null {
+):
+  | { type: "path"; operation: "read" | "write" | "delete"; list: string[] }
+  | { type: "command" }
+  | null {
   switch (toolName) {
     case "read_file":
     case "list_files":
@@ -284,11 +289,22 @@ export async function runAgent(
       const scratchpadPath = resolve(cwd, config.scratchpad);
       // Containment check — scratchpad must be inside cwd
       let realCwd: string;
-      try { realCwd = realpathSync(cwd); } catch { realCwd = cwd; }
+      try {
+        realCwd = realpathSync(cwd);
+      } catch {
+        realCwd = cwd;
+      }
       const normalizedCwd = realCwd.endsWith(sep) ? realCwd : realCwd + sep;
       let realScratchpad: string | null;
-      try { realScratchpad = realpathSync(scratchpadPath); } catch { realScratchpad = null; }
-      if (realScratchpad !== null && (realScratchpad === realCwd || realScratchpad.startsWith(normalizedCwd))) {
+      try {
+        realScratchpad = realpathSync(scratchpadPath);
+      } catch {
+        realScratchpad = null;
+      }
+      if (
+        realScratchpad !== null &&
+        (realScratchpad === realCwd || realScratchpad.startsWith(normalizedCwd))
+      ) {
         const scratchpadFile = Bun.file(realScratchpad);
         if (await scratchpadFile.exists()) {
           const scratchpadContent = await scratchpadFile.text();
@@ -299,9 +315,7 @@ export async function runAgent(
       }
     }
 
-    let messages: Anthropic.MessageParam[] = [
-      { role: "user", content: userContent },
-    ];
+    let messages: Anthropic.MessageParam[] = [{ role: "user", content: userContent }];
 
     // Tool loop within this iteration
     while (true) {
@@ -342,7 +356,13 @@ export async function runAgent(
 
       // Check token budget after each API call
       if (totalInputTokens + totalOutputTokens >= config.token_budget) {
-        await writeNeedsApproval(cwd, agentName, config.token_budget, totalInputTokens, totalOutputTokens);
+        await writeNeedsApproval(
+          cwd,
+          agentName,
+          config.token_budget,
+          totalInputTokens,
+          totalOutputTokens,
+        );
         logger.signalWrite("needs_approval", signalPaths.needsApproval);
         return { exitCode: 0 };
       }
@@ -360,20 +380,16 @@ export async function runAgent(
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const toolUse of toolUseBlocks) {
         const toolStart = Date.now();
-        const result = await executeTool(
-          toolUse.name,
-          toolUse.input,
-          cwd,
-          config,
-        );
+        const result = await executeTool(toolUse.name, toolUse.input, cwd, config);
         const toolDuration = Date.now() - toolStart;
         const parsed = JSON.parse(result) as Record<string, unknown>;
         const permitted = parsed.error !== "permission_denied";
-        const target = typeof (toolUse.input as Record<string, unknown>)?.path === "string"
-          ? (toolUse.input as Record<string, unknown>).path as string
-          : typeof (toolUse.input as Record<string, unknown>)?.command === "string"
-            ? (toolUse.input as Record<string, unknown>).command as string
-            : toolUse.name;
+        const target =
+          typeof (toolUse.input as Record<string, unknown>)?.path === "string"
+            ? ((toolUse.input as Record<string, unknown>).path as string)
+            : typeof (toolUse.input as Record<string, unknown>)?.command === "string"
+              ? ((toolUse.input as Record<string, unknown>).command as string)
+              : toolUse.name;
         logger.toolCall(toolUse.name, target as string, permitted, toolDuration);
 
         toolResults.push({

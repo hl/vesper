@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, writeFile as fsWriteFile, readFile as fsReadFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { readFile as fsReadFile, writeFile as fsWriteFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readFile, listFiles, writeFile, patchFile, deleteFile, runCommand } from "../src/tools.js";
+import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } from "../src/tools.js";
 
 let tempDir: string;
 
@@ -120,7 +120,9 @@ describe("patchFile", () => {
     expect("error" in result).toBe(true);
     if ("error" in result) {
       expect(result.error).toBe("patch_failed");
-      expect("detail" in result && typeof result.detail === "string" && result.detail.length > 0).toBe(true);
+      expect(
+        "detail" in result && typeof result.detail === "string" && result.detail.length > 0,
+      ).toBe(true);
     }
 
     const content = await fsReadFile(filePath, "utf-8");
@@ -129,10 +131,7 @@ describe("patchFile", () => {
 
   it("applies a multi-hunk diff correctly", async () => {
     const filePath = join(tempDir, "multi.txt");
-    await fsWriteFile(
-      filePath,
-      "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n",
-    );
+    await fsWriteFile(filePath, "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n");
 
     const patch = [
       "--- a/multi.txt",

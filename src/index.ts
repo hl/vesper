@@ -1,10 +1,10 @@
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { type AgentConfig, resolveAgent, loadConfig } from "./config.js";
 import { runAgent } from "./agent.js";
 import { CompletionTracker } from "./completion.js";
+import { type AgentConfig, loadConfig, resolveAgent } from "./config.js";
+import { exitWithError, VesperError } from "./errors.js";
 import { writeComplete, writeFailed } from "./signals.js";
-import { VesperError, exitWithError } from "./errors.js";
 
 async function main(): Promise<void> {
   const argv = await yargs(hideBin(process.argv))
