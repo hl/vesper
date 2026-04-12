@@ -1,4 +1,4 @@
-system_prompt: reviewer.md
+system_prompt: system_prompts/reviewer.md
 token_budget: 100000
 log_denied_calls: false
 log_events: false

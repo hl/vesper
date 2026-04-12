@@ -37,46 +37,34 @@ export interface AgentConfig {
 
 export interface ResolvedAgent {
   configPath: string;
-  promptPath: string;
-  configDir: string;
+  vesperDir: string;
 }
 
 export function resolveAgent(name: string, cwd: string, home?: string): ResolvedAgent {
   const homeDir = home ?? homedir();
-  const locations = [join(cwd, ".vesper", "agents"), join(homeDir, ".config", "vesper")];
+  const vesperDirs = [join(cwd, ".vesper"), join(homeDir, ".config", "vesper")];
 
-  for (const dir of locations) {
-    const ymlPath = join(dir, `${name}.yml`);
-    const mdPath = join(dir, `${name}.md`);
-    const ymlExists = existsSync(ymlPath);
-    const mdExists = existsSync(mdPath);
+  for (const vesperDir of vesperDirs) {
+    const agentsDir = join(vesperDir, "agents");
+    const ymlPath = join(agentsDir, `${name}.yml`);
 
-    if (ymlExists && mdExists) {
-      return { configPath: ymlPath, promptPath: mdPath, configDir: dir };
-    }
-
-    if (ymlExists && !mdExists) {
-      throw new VesperError(`Found ${ymlPath} but missing ${mdPath}`, 1);
-    }
-
-    if (!ymlExists && mdExists) {
-      throw new VesperError(`Found ${mdPath} but missing ${ymlPath}`, 1);
+    if (existsSync(ymlPath)) {
+      return { configPath: ymlPath, vesperDir };
     }
   }
 
   // Check if agent exists at the old .vesper/ path and provide migration hint
-  const oldDir = join(cwd, ".vesper");
-  const oldYml = join(oldDir, `${name}.yml`);
-  const oldMd = join(oldDir, `${name}.md`);
-  if (existsSync(oldYml) || existsSync(oldMd)) {
+  const oldYml = join(cwd, ".vesper", `${name}.yml`);
+  if (existsSync(oldYml)) {
     throw new VesperError(
-      `Agent "${name}" found at ${oldDir} but Vesper now expects ${locations[0]}. ` +
-        `Run: mkdir -p .vesper/agents && mv .vesper/*.yml .vesper/*.md .vesper/agents/`,
+      `Agent "${name}" found at ${join(cwd, ".vesper")} but Vesper now expects ${vesperDirs[0]}/agents/. ` +
+        `Run: mkdir -p .vesper/agents && mv .vesper/*.yml .vesper/agents/`,
       1,
     );
   }
 
-  throw new VesperError(`Agent "${name}" not found in ${locations.join(" or ")}`, 1);
+  const searchPaths = vesperDirs.map((d) => join(d, "agents"));
+  throw new VesperError(`Agent "${name}" not found in ${searchPaths.join(" or ")}`, 1);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

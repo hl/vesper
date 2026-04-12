@@ -1,4 +1,4 @@
-system_prompt: scribe.md
+system_prompt: system_prompts/scribe.md
 token_budget: 100000
 log_denied_calls: false
 log_events: false
