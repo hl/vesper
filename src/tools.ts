@@ -36,16 +36,18 @@ export async function listFiles(
     if (Buffer.byteLength(serialized, "utf-8") <= maxResultSize) {
       return { entries };
     }
-    // Truncate by reducing entry count until under limit
-    let count = entries.length;
-    while (count > 0) {
-      count = Math.floor(count / 2);
-      const subset = entries.slice(0, count);
-      if (Buffer.byteLength(JSON.stringify(subset), "utf-8") <= maxResultSize) {
-        return { entries: subset, truncated: true, total_entries: entries.length };
+    // Binary search for the maximum entry count that fits within the limit
+    let lo = 0;
+    let hi = entries.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (Buffer.byteLength(JSON.stringify(entries.slice(0, mid)), "utf-8") <= maxResultSize) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
       }
     }
-    return { entries: [], truncated: true, total_entries: entries.length };
+    return { entries: entries.slice(0, lo), truncated: true, total_entries: entries.length };
   } catch (err: unknown) {
     if (
       err instanceof Error &&
