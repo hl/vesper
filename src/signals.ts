@@ -49,11 +49,13 @@ export async function writeNeedsApproval(
   budget: number,
   inputTokens: number,
   outputTokens: number,
+  context: string | null,
 ): Promise<void> {
   const payload = {
     reason: "token_budget_exceeded",
     agent,
     message: `Token budget of ${budget} exhausted after ${inputTokens} input and ${outputTokens} output tokens.`,
+    context,
   };
   await Bun.write(paths.needsApproval, JSON.stringify(payload, null, 2));
 }
@@ -63,7 +65,8 @@ export async function writeFailed(
   agent: string,
   reason: "no_progress" | "error",
   message: string,
+  context?: string | null,
 ): Promise<void> {
-  const payload = { reason, agent, message };
+  const payload = { reason, agent, message, context: context ?? null };
   await Bun.write(paths.failed, JSON.stringify(payload, null, 2));
 }

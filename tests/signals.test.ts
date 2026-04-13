@@ -117,7 +117,7 @@ describe("signals", () => {
   describe("writeNeedsApproval", () => {
     it("writes needs-approval signal as valid JSON with correct fields", async () => {
       const paths = defaultSignals();
-      await writeNeedsApproval(paths, "coder", 50000, 30000, 25000);
+      await writeNeedsApproval(paths, "coder", 50000, 30000, 25000, "Working on task 3");
       expect(existsSync(paths.needsApproval)).toBe(true);
 
       const content = JSON.parse(readFileSync(paths.needsApproval, "utf-8"));
@@ -126,6 +126,14 @@ describe("signals", () => {
       expect(content.message).toBe(
         "Token budget of 50000 exhausted after 30000 input and 25000 output tokens.",
       );
+      expect(content.context).toBe("Working on task 3");
+    });
+
+    it("writes null context when none provided", async () => {
+      const paths = defaultSignals();
+      await writeNeedsApproval(paths, "coder", 50000, 30000, 25000, null);
+      const content = JSON.parse(readFileSync(paths.needsApproval, "utf-8"));
+      expect(content.context).toBeNull();
     });
   });
 
@@ -149,6 +157,15 @@ describe("signals", () => {
       expect(content.reason).toBe("error");
       expect(content.agent).toBe("coder");
       expect(content.message).toBe("API request failed");
+      expect(content.context).toBeNull();
+    });
+
+    it("includes context when provided", async () => {
+      const paths = defaultSignals();
+      await writeFailed(paths, "coder", "error", "Budget exhausted", "Stuck on auth module");
+
+      const content = JSON.parse(readFileSync(paths.failed, "utf-8"));
+      expect(content.context).toBe("Stuck on auth module");
     });
   });
 
@@ -156,7 +173,7 @@ describe("signals", () => {
     it("writes all signal files to cwd", async () => {
       const paths = defaultSignals();
       await writeComplete(paths);
-      await writeNeedsApproval(paths, "agent", 1000, 500, 600);
+      await writeNeedsApproval(paths, "agent", 1000, 500, 600, null);
       await writeFailed(paths, "agent", "error", "fail");
 
       expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { executeTool, type MessageClient, runAgent } from "../src/agent.js";
+import { executeTool, extractLastText, type MessageClient, runAgent } from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
 
 // ---------------------------------------------------------------------------
@@ -111,6 +111,34 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("extractLastText", () => {
+  it("returns last text block content", () => {
+    const msg = makeMessage({
+      content: [makeTextBlock("First block"), makeTextBlock("Last block")],
+    });
+    expect(extractLastText(msg)).toBe("Last block");
+  });
+
+  it("returns null when no text blocks", () => {
+    const msg = makeMessage({ content: [] });
+    expect(extractLastText(msg)).toBeNull();
+  });
+
+  it("skips empty text blocks", () => {
+    const msg = makeMessage({
+      content: [makeTextBlock("Meaningful text"), makeTextBlock("   ")],
+    });
+    expect(extractLastText(msg)).toBe("Meaningful text");
+  });
+
+  it("truncates to 1000 characters", () => {
+    const longText = "x".repeat(2000);
+    const msg = makeMessage({ content: [makeTextBlock(longText)] });
+    const result = extractLastText(msg);
+    expect(result?.length).toBe(1000);
+  });
+});
 
 describe("runAgent", () => {
   // 1. end_turn on first call — no watch_file configured (null)

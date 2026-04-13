@@ -10,6 +10,18 @@ import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } fro
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250514";
 const MAX_OUTPUT_TOKENS = 4096;
+const MAX_CONTEXT_LENGTH = 1000;
+
+export function extractLastText(response: Anthropic.Message): string | null {
+  for (let i = response.content.length - 1; i >= 0; i--) {
+    const block = response.content[i];
+    if (block.type === "text" && block.text.trim().length > 0) {
+      const text = block.text.trim();
+      return text.length > MAX_CONTEXT_LENGTH ? text.slice(0, MAX_CONTEXT_LENGTH) : text;
+    }
+  }
+  return null;
+}
 const MAX_ITERATIONS = 1000;
 
 const TOOL_DEFINITIONS: Anthropic.Tool[] = [
@@ -360,6 +372,7 @@ export async function runAgent(
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let iterationCount = 0;
+  let lastResponse: Anthropic.Message | null = null;
 
   // Load skills once before the iteration loop (R6)
   const skillsContent = config.skills !== null ? loadSkills(config.skills, cwd, logger) : null;
@@ -419,6 +432,7 @@ export async function runAgent(
         return { exitCode: 1 };
       }
       const callLatency = Date.now() - callStart;
+      lastResponse = response;
 
       // Track usage after each API call
       totalInputTokens += response.usage.input_tokens;
@@ -432,6 +446,7 @@ export async function runAgent(
           agentName,
           "error",
           "Response truncated: stop_reason was 'max_tokens'. The model's output exceeded the per-call limit.",
+          extractLastText(response),
         );
         logger.signalWrite("failed", signalPaths.failed);
         return { exitCode: 1 };
@@ -445,6 +460,7 @@ export async function runAgent(
           config.token_budget,
           totalInputTokens,
           totalOutputTokens,
+          extractLastText(response),
         );
         logger.signalWrite("needs_approval", signalPaths.needsApproval);
         return { exitCode: 0 };
@@ -505,6 +521,7 @@ export async function runAgent(
         agentName,
         "no_progress",
         `No progress detected after ${config.completion.no_progress_limit} consecutive iterations.`,
+        lastResponse ? extractLastText(lastResponse) : null,
       );
       logger.signalWrite("failed", signalPaths.failed);
       return { exitCode: 1 };
@@ -524,6 +541,7 @@ export async function runAgent(
     agentName,
     "error",
     `Maximum iteration limit (${MAX_ITERATIONS}) reached without completion.`,
+    lastResponse ? extractLastText(lastResponse) : null,
   );
   logger.signalWrite("failed", signalPaths.failed);
   return { exitCode: 1 };
