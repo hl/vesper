@@ -8,7 +8,7 @@ import { checkCommandPermission, checkPathPermission, logDeniedCall } from "./pe
 import { getSignalPaths, writeComplete, writeFailed, writeNeedsApproval } from "./signals.js";
 import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } from "./tools.js";
 
-const DEFAULT_MODEL = "claude-sonnet-4-5-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
 const MAX_OUTPUT_TOKENS = 4096;
 const MAX_CONTEXT_LENGTH = 1000;
 
@@ -34,6 +34,7 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
         path: { type: "string", description: "File path relative to the working directory" },
       },
       required: ["path"],
+      additionalProperties: false,
     },
     strict: true,
   },
@@ -47,6 +48,7 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
         path: { type: "string", description: "Directory path relative to the working directory" },
       },
       required: ["path"],
+      additionalProperties: false,
     },
     strict: true,
   },
@@ -61,6 +63,7 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
         content: { type: "string", description: "Content to write to the file" },
       },
       required: ["path", "content"],
+      additionalProperties: false,
     },
     strict: true,
   },
@@ -74,6 +77,7 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
         patch: { type: "string", description: "Unified diff patch to apply" },
       },
       required: ["path", "patch"],
+      additionalProperties: false,
     },
     strict: true,
   },
@@ -86,6 +90,7 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
         path: { type: "string", description: "File path relative to the working directory" },
       },
       required: ["path"],
+      additionalProperties: false,
     },
     strict: true,
   },
@@ -103,6 +108,7 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
         },
       },
       required: ["command", "args"],
+      additionalProperties: false,
     },
     strict: true,
   },
