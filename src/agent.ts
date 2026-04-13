@@ -512,10 +512,21 @@ export async function runAgent(
       // Intercept signal tool — records exit signal in local state, no I/O
       if (toolUse.name === "signal") {
         const input = toolUse.input as Record<string, unknown>;
-        const signalType = input.type as "complete" | "needs_approval" | "failed";
+        const rawType = input.type;
+        if (rawType !== "complete" && rawType !== "needs_approval" && rawType !== "failed") {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: JSON.stringify({
+              error: "invalid_signal_type",
+              message: `Invalid signal type: ${String(rawType)}. Must be "complete", "needs_approval", or "failed".`,
+            }),
+          });
+          continue;
+        }
         const signalMessage = typeof input.message === "string" ? input.message : undefined;
-        recordedSignal = { type: signalType, message: signalMessage };
-        logger.toolCall("signal", signalType, true, 0);
+        recordedSignal = { type: rawType, message: signalMessage };
+        logger.toolCall("signal", rawType, true, 0);
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,

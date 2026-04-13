@@ -1261,4 +1261,106 @@ describe("signal tool", () => {
     expect(payload.reason).toBe("agent_failed");
     expect(payload.context).toBe("Cannot proceed");
   });
+
+  it("signal tool works alongside other tools in same API response batch", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("signal", { type: "complete" }),
+              makeToolUseBlock("read_file", { path: "prompt.md" }, "toolu_read_1"),
+            ],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test content");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+    expect(callCount).toBe(2);
+  });
+
+  it("max_tokens overrides previously recorded signal", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "complete" })],
+          });
+        }
+        return makeMessage({ stop_reason: "max_tokens" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    const result = await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(false);
+    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(true);
+    const payload = JSON.parse(readFileSync(join(tempDir, ".vesper-failed"), "utf-8"));
+    expect(payload.reason).toBe("error");
+  });
+
+  it("signal(failed) without message uses default fallback text and null context", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "failed" })],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("agent_failed");
+    expect(payload.message).toBe("Agent signaled failure");
+    expect(payload.context).toBeNull();
+  });
+
+  it("signal(complete) with message silently ignores the message", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "complete", message: "all done" })],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+    expect(readFileSync(join(tempDir, ".vesper-complete"), "utf-8")).toBe("");
+  });
 });
