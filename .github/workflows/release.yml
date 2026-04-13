@@ -68,7 +68,7 @@ jobs:
 
       - name: Update Homebrew formula
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           SHA_DARWIN_ARM64="${{ steps.sha.outputs.vesper_darwin_arm64_sha256 }}"
@@ -115,7 +115,7 @@ jobs:
           end
           FORMULA
 
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/hl/homebrew-tap.git" /tmp/homebrew-tap
+          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/hl/homebrew-tap.git" /tmp/homebrew-tap
           mkdir -p /tmp/homebrew-tap/Formula
           cp /tmp/vesper.rb /tmp/homebrew-tap/Formula/vesper.rb
           cd /tmp/homebrew-tap
