@@ -523,5 +523,48 @@ tools: {}
     expect(config.command_timeout).toBe(30);
     expect(config.scratchpad).toBeNull();
     expect(config.skills).toBeNull();
+    expect(config.context_files).toEqual([]);
+  });
+
+  it("parses context_files correctly when it is a valid string array", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_files:
+  - CLAUDE.md
+  - .cursorrules
+tools: {}
+`;
+    const path = writeYaml("valid-context-files.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.context_files).toEqual(["CLAUDE.md", ".cursorrules"]);
+  });
+
+  it("defaults context_files to empty array when absent", () => {
+    const path = writeYaml("no-context-files.yml", minimalYaml);
+    const config = loadConfig(path);
+    expect(config.context_files).toEqual([]);
+  });
+
+  it("exits with code 1 when context_files contains non-strings", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_files:
+  - 1
+  - 2
+tools: {}
+`;
+    const path = writeYaml("bad-context-files.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("context_files");
+    }
   });
 });

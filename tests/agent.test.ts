@@ -23,6 +23,7 @@ function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
     max_tool_result_size: overrides?.max_tool_result_size ?? 102400,
     scratchpad: overrides?.scratchpad ?? null,
     skills: overrides?.skills ?? null,
+    context_files: overrides?.context_files ?? [],
     signals: overrides?.signals ?? {
       complete: ".vesper-complete",
       needs_approval: ".vesper-needs-approval",

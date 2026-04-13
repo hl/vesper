@@ -22,6 +22,7 @@ export interface AgentConfig {
   max_tool_result_size: number;
   scratchpad: string | null;
   skills: string | null;
+  context_files: string[];
   signals: SignalConfig;
   tools: {
     read: string[];
@@ -141,6 +142,9 @@ export function loadConfig(configPath: string): AgentConfig {
     throw new VesperError(`"skills" must be a string or null in ${configPath}`, 1);
   }
 
+  const contextFiles = parsed.context_files ?? [];
+  assertStringArray(contextFiles, "context_files");
+
   // v0.3: command_env
   const commandEnv = parsed.command_env ?? [];
   assertStringArray(commandEnv, "command_env");
@@ -190,6 +194,7 @@ export function loadConfig(configPath: string): AgentConfig {
     max_tool_result_size: maxToolResultSize,
     scratchpad,
     skills,
+    context_files: contextFiles,
     signals,
     tools: {
       read: toolRead,

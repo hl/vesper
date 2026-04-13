@@ -38,4 +38,8 @@ export class Logger {
   skillsLoaded(fileCount: number, totalBytes: number, files: string[]): void {
     this.emit("skills_loaded", { file_count: fileCount, total_bytes: totalBytes, files });
   }
+
+  contextFilesLoaded(loaded: string[], skipped: string[]): void {
+    this.emit("context_files_loaded", { loaded, skipped });
+  }
 }

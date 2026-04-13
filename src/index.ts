@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Argv } from "yargs";
 import { runAgent } from "./agent.js";
 import { type AgentConfig, loadConfig, resolveAgent } from "./config.js";
@@ -7,6 +9,30 @@ import { checkStaleSignals, getSignalPaths, writeFailed } from "./signals.js";
 import { VERSION } from "./version.js";
 
 export const RESERVED_NAMES = ["init", "run", "help", "version"];
+
+export function loadContextFiles(
+  files: string[],
+  cwd: string,
+): { content: string; loaded: string[]; skipped: string[] } {
+  const loaded: string[] = [];
+  const skipped: string[] = [];
+  let content = "";
+  for (const file of files) {
+    const filePath = resolve(cwd, file);
+    if (existsSync(filePath)) {
+      const text = readFileSync(filePath, "utf-8");
+      if (text.trim().length > 0) {
+        content += `\n\n# ${file}\n\n${text}`;
+        loaded.push(file);
+      } else {
+        skipped.push(file);
+      }
+    } else {
+      skipped.push(file);
+    }
+  }
+  return { content, loaded, skipped };
+}
 
 interface ParsedRunArgs {
   _: string[];
@@ -112,7 +138,15 @@ async function handleRun(agentName: string, cwd: string): Promise<void> {
   if (!(await systemPromptFile.exists())) {
     exitWithError(`System prompt file not found: ${vesperDir}/${config.system_prompt}`);
   }
-  const systemPrompt = await systemPromptFile.text();
+  let systemPrompt = await systemPromptFile.text();
+
+  // Append context files to system prompt (paths resolved relative to cwd)
+  if (config.context_files.length > 0) {
+    const result = loadContextFiles(config.context_files, cwd);
+    if (result.content.length > 0) {
+      systemPrompt += result.content;
+    }
+  }
 
   // Read task prompt from stdin
   const taskPrompt = await Bun.stdin.text();

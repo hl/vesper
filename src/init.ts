@@ -31,6 +31,8 @@ log_denied_calls: false                    # Log when a tool call is denied
 log_events: false                          # Emit JSONL event stream to stderr
 skills: ".vesper/skills"                   # Directory of skill .md files (null to disable)
 scratchpad: ".vesper/.scratchpad.md"       # Persistent scratchpad file (null to disable)
+context_files:                             # Project files appended to system prompt
+  - CLAUDE.md
 
 signals:
   complete: ".vesper-complete"             # Written on successful completion
