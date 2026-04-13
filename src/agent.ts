@@ -8,7 +8,7 @@ import { checkCommandPermission, checkPathPermission, logDeniedCall } from "./pe
 import { getSignalPaths, writeComplete, writeFailed, writeNeedsApproval } from "./signals.js";
 import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } from "./tools.js";
 
-const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 const MAX_OUTPUT_TOKENS = 4096;
 const MAX_CONTEXT_LENGTH = 1000;
 
