@@ -9,8 +9,23 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: bun-darwin-arm64
+            artifact: vesper_darwin_arm64
+          - os: macos-13
+            target: bun-darwin-x64
+            artifact: vesper_darwin_x64
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            artifact: vesper_linux_x64
+          - os: ubuntu-latest
+            target: bun-linux-arm64
+            artifact: vesper_linux_arm64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,34 +36,36 @@ jobs:
       - run: bun install
 
       - name: Quality gates
+        if: matrix.artifact == 'vesper_darwin_arm64'
         run: make check
 
       - name: Extract version
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Cross-compile
+      - name: Build
         run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
-          declare -A TARGETS=(
-            ["darwin_arm64"]="bun-darwin-arm64"
-            ["darwin_x64"]="bun-darwin-x64"
-            ["linux_arm64"]="bun-linux-arm64"
-            ["linux_x64"]="bun-linux-x64"
-          )
+          bun build src/index.ts --compile \
+            --target="${{ matrix.target }}" \
+            --define "VESPER_VERSION='${{ steps.version.outputs.VERSION }}'" \
+            --outfile vesper
+          tar -czf "${{ matrix.artifact }}.tar.gz" vesper
 
-          mkdir -p dist
-          for key in "${!TARGETS[@]}"; do
-            target="${TARGETS[$key]}"
-            echo "Building for $target..."
-            bun build src/index.ts --compile \
-              --target="$target" \
-              --define "VESPER_VERSION='$VERSION'" \
-              --outfile "dist/vesper"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
 
-            tar -czf "dist/vesper_${key}.tar.gz" -C dist vesper
-            rm dist/vesper
-          done
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Compute SHA256
         id: sha
@@ -70,7 +87,7 @@ jobs:
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
+          VERSION="${GITHUB_REF_NAME#v}"
           SHA_DARWIN_ARM64="${{ steps.sha.outputs.vesper_darwin_arm64_sha256 }}"
           SHA_DARWIN_X64="${{ steps.sha.outputs.vesper_darwin_x64_sha256 }}"
           SHA_LINUX_ARM64="${{ steps.sha.outputs.vesper_linux_arm64_sha256 }}"
@@ -107,10 +124,6 @@ jobs:
 
             def install
               bin.install "vesper"
-              # Strip quarantine attribute on macOS to prevent Gatekeeper from killing unsigned binaries
-              if OS.mac?
-                system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", bin/"vesper"]
-              end
             end
 
             test do
