@@ -107,6 +107,10 @@ jobs:
 
             def install
               bin.install "vesper"
+              # Strip quarantine attribute on macOS to prevent Gatekeeper from killing unsigned binaries
+              if OS.mac?
+                system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", bin/"vesper"]
+              end
             end
 
             test do
