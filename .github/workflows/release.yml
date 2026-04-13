@@ -14,13 +14,11 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            target: bun-darwin-arm64
             artifact: vesper_darwin_arm64
           - os: macos-latest
             target: bun-darwin-x64
             artifact: vesper_darwin_x64
           - os: ubuntu-latest
-            target: bun-linux-x64
             artifact: vesper_linux_x64
           - os: ubuntu-latest
             target: bun-linux-arm64
@@ -43,16 +41,20 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build
+      - name: Build (native)
+        if: matrix.target == ''
+        run: |
+          bun build src/index.ts --compile \
+            --define "VESPER_VERSION='${{ steps.version.outputs.VERSION }}'" \
+            --outfile vesper
+
+      - name: Build (cross)
+        if: matrix.target != ''
         run: |
           bun build src/index.ts --compile \
             --target="${{ matrix.target }}" \
             --define "VESPER_VERSION='${{ steps.version.outputs.VERSION }}'" \
             --outfile vesper
-
-      - name: Ad-hoc sign (macOS)
-        if: runner.os == 'macOS'
-        run: codesign -s - vesper
 
       - name: Package
         run: tar -czf "${{ matrix.artifact }}.tar.gz" vesper
