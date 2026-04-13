@@ -57,7 +57,6 @@ describe("vesper init", () => {
       expect(content).toContain("system_prompt: system_prompts/example.md");
       expect(content).toContain("token_budget: 100000");
       expect(content).toContain("tools:");
-      expect(content).toContain("completion:");
       expect(content).toContain("signals:");
     });
 

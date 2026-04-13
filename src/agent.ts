@@ -1,7 +1,6 @@
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import { CompletionTracker } from "./completion.js";
 import type { AgentConfig } from "./config.js";
 import { Logger } from "./logger.js";
 import { checkCommandPermission, checkPathPermission, logDeniedCall } from "./permissions.js";
@@ -22,8 +21,6 @@ export function extractLastText(response: Anthropic.Message): string | null {
   }
   return null;
 }
-const MAX_ITERATIONS = 1000;
-
 const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
     name: "read_file",
@@ -355,11 +352,6 @@ export async function runAgent(
   client?: MessageClient,
 ): Promise<RunAgentResult> {
   const messagesClient: MessageClient = client ?? new Anthropic().messages;
-  const tracker = new CompletionTracker(
-    config.completion.watch_file,
-    config.completion.no_progress_limit,
-    cwd,
-  );
   const logger = new Logger(config.log_events);
   const signalPaths = getSignalPaths(cwd, config.signals);
 
@@ -377,178 +369,134 @@ export async function runAgent(
 
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
-  let iterationCount = 0;
-  let lastResponse: Anthropic.Message | null = null;
 
-  // Load skills once before the iteration loop (R6)
+  // Load skills
   const skillsContent = config.skills !== null ? loadSkills(config.skills, cwd, logger) : null;
 
-  // Iteration loop — each iteration is a fresh API conversation.
-  // Context does not accumulate across iterations (by design).
-  while (iterationCount < MAX_ITERATIONS) {
-    iterationCount++;
-    logger.iterationStart(iterationCount);
+  // Build user message: [Skills] → [Previous Context] → [Task]
+  let userContent = taskPrompt;
 
-    // Build user message: [Skills] → [Previous Context] → [Task]
-    let userContent = taskPrompt;
-
-    // R9: Inject scratchpad contents (re-read each iteration to capture agent writes)
-    let scratchpadContent: string | null = null;
-    if (config.scratchpad !== null) {
-      const scratchpadPath = resolve(cwd, config.scratchpad);
-      const realScratchpad = isInsideCwd(scratchpadPath, cwd);
-      if (realScratchpad !== null) {
-        const scratchpadFile = Bun.file(realScratchpad);
-        if (await scratchpadFile.exists()) {
-          const text = await scratchpadFile.text();
-          if (text.trim().length > 0) {
-            scratchpadContent = text;
-          }
+  // Inject scratchpad contents
+  let scratchpadContent: string | null = null;
+  if (config.scratchpad !== null) {
+    const scratchpadPath = resolve(cwd, config.scratchpad);
+    const realScratchpad = isInsideCwd(scratchpadPath, cwd);
+    if (realScratchpad !== null) {
+      const scratchpadFile = Bun.file(realScratchpad);
+      if (await scratchpadFile.exists()) {
+        const text = await scratchpadFile.text();
+        if (text.trim().length > 0) {
+          scratchpadContent = text;
         }
       }
     }
+  }
 
-    // Compose user message based on which sections are present
-    if (skillsContent !== null && scratchpadContent !== null) {
-      userContent = `${skillsContent}\n\n[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
-    } else if (skillsContent !== null) {
-      userContent = `${skillsContent}\n\n[Task]\n${taskPrompt}`;
-    } else if (scratchpadContent !== null) {
-      userContent = `[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
+  // Compose user message based on which sections are present
+  if (skillsContent !== null && scratchpadContent !== null) {
+    userContent = `${skillsContent}\n\n[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
+  } else if (skillsContent !== null) {
+    userContent = `${skillsContent}\n\n[Task]\n${taskPrompt}`;
+  } else if (scratchpadContent !== null) {
+    userContent = `[Previous Context]\n${scratchpadContent}\n\n[Task]\n${taskPrompt}`;
+  }
+
+  let messages: Anthropic.MessageParam[] = [{ role: "user", content: userContent }];
+
+  // Tool loop — model calls tools until it stops
+  while (true) {
+    let response: Anthropic.Message;
+    const callStart = Date.now();
+    try {
+      response = await messagesClient.create({
+        model,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system: systemBlocks,
+        tools: toolsParam,
+        messages,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await writeFailed(signalPaths, agentName, "error", `API error: ${message}`);
+      logger.signalWrite("failed", signalPaths.failed);
+      return { exitCode: 1 };
     }
+    const callLatency = Date.now() - callStart;
 
-    let messages: Anthropic.MessageParam[] = [{ role: "user", content: userContent }];
+    // Track usage after each API call
+    totalInputTokens += response.usage.input_tokens;
+    totalOutputTokens += response.usage.output_tokens;
+    logger.apiCall(model, response.usage.input_tokens, response.usage.output_tokens, callLatency);
 
-    // Tool loop within this iteration
-    while (true) {
-      let response: Anthropic.Message;
-      const callStart = Date.now();
-      try {
-        response = await messagesClient.create({
-          model,
-          max_tokens: MAX_OUTPUT_TOKENS,
-          system: systemBlocks,
-          tools: toolsParam,
-          messages,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        await writeFailed(signalPaths, agentName, "error", `API error: ${message}`);
-        logger.signalWrite("failed", signalPaths.failed);
-        return { exitCode: 1 };
-      }
-      const callLatency = Date.now() - callStart;
-      lastResponse = response;
-
-      // Track usage after each API call
-      totalInputTokens += response.usage.input_tokens;
-      totalOutputTokens += response.usage.output_tokens;
-      logger.apiCall(model, response.usage.input_tokens, response.usage.output_tokens, callLatency);
-
-      // R12: Treat max_tokens truncation as a hard error (checked before budget)
-      if (response.stop_reason === "max_tokens") {
-        await writeFailed(
-          signalPaths,
-          agentName,
-          "error",
-          "Response truncated: stop_reason was 'max_tokens'. The model's output exceeded the per-call limit.",
-          extractLastText(response),
-        );
-        logger.signalWrite("failed", signalPaths.failed);
-        return { exitCode: 1 };
-      }
-
-      // Check token budget after each API call
-      if (totalInputTokens + totalOutputTokens >= config.token_budget) {
-        await writeNeedsApproval(
-          signalPaths,
-          agentName,
-          config.token_budget,
-          totalInputTokens,
-          totalOutputTokens,
-          extractLastText(response),
-        );
-        logger.signalWrite("needs_approval", signalPaths.needsApproval);
-        return { exitCode: 0 };
-      }
-
-      // If no tool use, iteration is complete
-      if (response.stop_reason !== "tool_use") {
-        break;
-      }
-
-      // Extract and execute tool calls
-      const toolUseBlocks = response.content.filter(
-        (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
-      );
-
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
-      for (const toolUse of toolUseBlocks) {
-        const toolStart = Date.now();
-        const result = await executeTool(toolUse.name, toolUse.input, cwd, config);
-        const toolDuration = Date.now() - toolStart;
-        const parsed = JSON.parse(result) as Record<string, unknown>;
-        const permitted = parsed.error !== "permission_denied";
-        const target =
-          typeof (toolUse.input as Record<string, unknown>)?.path === "string"
-            ? ((toolUse.input as Record<string, unknown>).path as string)
-            : typeof (toolUse.input as Record<string, unknown>)?.command === "string"
-              ? ((toolUse.input as Record<string, unknown>).command as string)
-              : toolUse.name;
-        logger.toolCall(toolUse.name, target as string, permitted, toolDuration);
-
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: result,
-        });
-      }
-
-      // Append assistant response and tool results for next round
-      messages = [
-        ...messages,
-        { role: "assistant", content: response.content },
-        { role: "user", content: toolResults },
-      ];
-    }
-
-    // Check completion condition
-    const completionStatus = await tracker.check();
-    logger.completionCheck(completionStatus);
-
-    if (completionStatus === "complete") {
-      await writeComplete(signalPaths);
-      logger.signalWrite("complete", signalPaths.complete);
-      return { exitCode: 0 };
-    }
-    if (completionStatus === "no_progress") {
+    // Treat max_tokens truncation as a hard error (checked before budget)
+    if (response.stop_reason === "max_tokens") {
       await writeFailed(
         signalPaths,
         agentName,
-        "no_progress",
-        `No progress detected after ${config.completion.no_progress_limit} consecutive iterations.`,
-        lastResponse ? extractLastText(lastResponse) : null,
+        "error",
+        "Response truncated: stop_reason was 'max_tokens'. The model's output exceeded the per-call limit.",
+        extractLastText(response),
       );
       logger.signalWrite("failed", signalPaths.failed);
       return { exitCode: 1 };
     }
 
-    // "continue" — next iteration
+    // Check token budget after each API call
+    if (totalInputTokens + totalOutputTokens >= config.token_budget) {
+      await writeNeedsApproval(
+        signalPaths,
+        agentName,
+        config.token_budget,
+        totalInputTokens,
+        totalOutputTokens,
+        extractLastText(response),
+      );
+      logger.signalWrite("needs_approval", signalPaths.needsApproval);
+      return { exitCode: 0 };
+    }
+
+    // If no tool use, conversation is complete
+    if (response.stop_reason !== "tool_use") {
+      break;
+    }
+
+    // Extract and execute tool calls
+    const toolUseBlocks = response.content.filter(
+      (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
+    );
+
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    for (const toolUse of toolUseBlocks) {
+      const toolStart = Date.now();
+      const result = await executeTool(toolUse.name, toolUse.input, cwd, config);
+      const toolDuration = Date.now() - toolStart;
+      const parsed = JSON.parse(result) as Record<string, unknown>;
+      const permitted = parsed.error !== "permission_denied";
+      const target =
+        typeof (toolUse.input as Record<string, unknown>)?.path === "string"
+          ? ((toolUse.input as Record<string, unknown>).path as string)
+          : typeof (toolUse.input as Record<string, unknown>)?.command === "string"
+            ? ((toolUse.input as Record<string, unknown>).command as string)
+            : toolUse.name;
+      logger.toolCall(toolUse.name, target as string, permitted, toolDuration);
+
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: toolUse.id,
+        content: result,
+      });
+    }
+
+    // Append assistant response and tool results for next round
+    messages = [
+      ...messages,
+      { role: "assistant", content: response.content },
+      { role: "user", content: toolResults },
+    ];
   }
 
-  // Max iterations reached
-  if (config.completion.watch_file === null) {
-    await writeComplete(signalPaths);
-    logger.signalWrite("complete", signalPaths.complete);
-    return { exitCode: 0 };
-  }
-  await writeFailed(
-    signalPaths,
-    agentName,
-    "error",
-    `Maximum iteration limit (${MAX_ITERATIONS}) reached without completion.`,
-    lastResponse ? extractLastText(lastResponse) : null,
-  );
-  logger.signalWrite("failed", signalPaths.failed);
-  return { exitCode: 1 };
+  // Conversation complete — write signal and exit
+  await writeComplete(signalPaths);
+  logger.signalWrite("complete", signalPaths.complete);
+  return { exitCode: 0 };
 }

@@ -25,7 +25,7 @@ const EXAMPLE_AGENT_YML = `# Agent configuration — see https://github.com/hl/v
 # Copy this file and the matching system prompt to create your own agent.
 
 system_prompt: system_prompts/example.md   # Relative to .vesper/
-token_budget: 100000                       # Max tokens across all iterations
+token_budget: 100000                       # Max tokens per run
 max_tool_result_size: 50000                # Truncate tool results beyond this (bytes)
 log_denied_calls: false                    # Log when a tool call is denied
 log_events: false                          # Emit JSONL event stream to stderr
@@ -48,10 +48,6 @@ tools:
   commands:                                # Allowed commands (binary or binary + first arg)
     - "bun test"
     - "git commit"
-
-completion:
-  watch_file: ~                            # File to monitor for completion (null = run to budget)
-  no_progress_limit: 3                     # Iterations without watch file change = no_progress
 `;
 
 const EXAMPLE_SYSTEM_PROMPT = `You are a helpful agent. Describe your agent's role and capabilities here.
@@ -86,8 +82,8 @@ This directory contains Vesper agent configurations, system prompts, skills, and
 
 ## Scratchpad
 
-Agents persist state between iterations via a scratchpad file (configured in the agent YAML).
-The default location is \`.vesper/.scratchpad.md\`. Each agent run starts fresh context but
+Agents can persist state via a scratchpad file (configured in the agent YAML).
+The default location is \`.vesper/.scratchpad.md\`. Each run starts fresh context but
 can read/write the scratchpad to carry forward plans and progress.
 
 ## Skills

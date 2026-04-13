@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Core flow: CLI args + stdin → Config resolution → Agent loop (iteration × tool calls) → Signal files
+Core flow: CLI args + stdin → Config resolution → Single API conversation (tool calls) → Signal files
 
 ## Workflow
 
@@ -37,13 +37,12 @@ If any gate fails, fix the root cause. Never suppress, skip, or work around a fa
 
 Core flow through source:
 
-- `index.ts` — CLI entry. Parses args (yargs), resolves agent config, early completion check, reads task from stdin, hands off to `runAgent`.
-- `agent.ts` — Core loop. Each **iteration** is a fresh API conversation (no context carry-forward). Within an iteration, tool calls loop until the model stops. After each iteration, checks completion.
+- `index.ts` — CLI entry. Parses args (yargs), resolves agent config, reads task from stdin, hands off to `runAgent`.
+- `agent.ts` — Runs a single API conversation. Tool calls loop until the model stops. Writes signal files on completion, budget exhaustion, or error. Iteration/re-invocation is handled externally by brr.
 - `config.ts` — YAML agent config loading and validation. Resolution: `.vesper/agents/` in cwd first, then `~/.config/vesper/`.
 - `permissions.ts` — Path: `minimatch` globs against symlink-resolved path relative to cwd. Command: binary name, optionally with first argument.
 - `tools.ts` — Six tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command`. Results truncated to `max_tool_result_size`.
-- `completion.ts` — `CompletionTracker` monitors watch file line count. Empty/missing = complete. No change for N iterations = no_progress.
-- `signals.ts` — Writes `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`.
+- `signals.ts` — Writes `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`. Paths configurable via `signals:` in agent YAML.
 - `logger.ts` — JSONL event stream to stderr when `log_events` is enabled.
 
 ## Code Standards
@@ -59,8 +58,8 @@ Core flow through source:
 ## Technical Constraints
 
 - **Single binary**: Compiles to one native executable via `bun build --compile`
+- **Single conversation per invocation**: Vesper runs one API conversation with tool calls, writes a signal file, and exits. Re-invocation and iteration are handled by the external orchestrator (brr).
 - **Structural safety**: Permission enforcement is structural, not instructional — tools are filtered from the API call entirely if the agent has no permissions for that category
-- **Fresh context per iteration**: No conversation carry-forward by design. Agents persist state through the scratchpad file, not history.
 - **Symlink resolution**: All path checks resolve symlinks to prevent escapes
 - **Prompt caching**: `cache_control: { type: "ephemeral" }` on system prompt block and last tool definition
 
@@ -70,9 +69,8 @@ Core flow through source:
 2. Path permissions are checked against the **real** (symlink-resolved) path, not the lexical path
 3. Command permissions match binary name only, or binary + first arg — no deeper arg matching
 4. `max_tokens` truncation (stop_reason `"max_tokens"`) is a hard error, not a retry
-5. Token budget is cumulative across iterations — exhaustion writes `needs_approval`, not `failed`
-6. Watch file completion: empty/missing = complete, stable line count = no_progress
-7. `writeComplete` and `writeFailed` accept either a cwd string or a `SignalPaths` object — check the overload
+5. Token budget exhaustion writes `needs_approval`, not `failed`
+6. `writeComplete` and `writeFailed` accept a `SignalPaths` object
 
 ## Navigation
 

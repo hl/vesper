@@ -18,10 +18,6 @@ export class Logger {
     process.stderr.write(`${line}\n`);
   }
 
-  iterationStart(iteration: number): void {
-    this.emit("iteration_start", { iteration });
-  }
-
   apiCall(model: string, inputTokens: number, outputTokens: number, latencyMs: number): void {
     this.emit("api_call", {
       model,
@@ -33,10 +29,6 @@ export class Logger {
 
   toolCall(tool: string, target: string, permitted: boolean, durationMs: number): void {
     this.emit("tool_call", { tool, target, permitted, duration_ms: durationMs });
-  }
-
-  completionCheck(status: string): void {
-    this.emit("completion_check", { status });
   }
 
   signalWrite(signalType: string, path: string): void {

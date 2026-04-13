@@ -135,16 +135,12 @@ tools:
   delete: []
   commands:
     - "bun test"
-completion:
-  watch_file: done.txt
-  no_progress_limit: 5
 `;
 
   const minimalYaml = `
 system_prompt: prompt.md
 token_budget: 50000
 tools: {}
-completion: {}
 `;
 
   it("parses a full config with all keys", () => {
@@ -158,8 +154,6 @@ completion: {}
     expect(config.tools.write).toEqual(["src/**/*.ts"]);
     expect(config.tools.delete).toEqual([]);
     expect(config.tools.commands).toEqual(["bun test"]);
-    expect(config.completion.watch_file).toBe("done.txt");
-    expect(config.completion.no_progress_limit).toBe(5);
   });
 
   it("parses all optional keys with correct defaults when absent", () => {
@@ -173,8 +167,21 @@ completion: {}
     expect(config.tools.write).toEqual([]);
     expect(config.tools.delete).toEqual([]);
     expect(config.tools.commands).toEqual([]);
-    expect(config.completion.watch_file).toBeNull();
-    expect(config.completion.no_progress_limit).toBe(3);
+  });
+
+  it("silently ignores completion block in YAML for backward compatibility", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools: {}
+completion:
+  watch_file: done.txt
+  no_progress_limit: 5
+`;
+    const path = writeYaml("has-completion.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.system_prompt).toBe("prompt.md");
+    expect(config.token_budget).toBe(50000);
   });
 
   it("respects log_denied_calls when set to true", () => {
@@ -183,7 +190,6 @@ system_prompt: prompt.md
 token_budget: 50000
 log_denied_calls: true
 tools: {}
-completion: {}
 `;
     const path = writeYaml("log.yml", yaml);
     const config = loadConfig(path);
@@ -194,7 +200,6 @@ completion: {}
     const yaml = `
 token_budget: 50000
 tools: {}
-completion: {}
 `;
     const path = writeYaml("no-prompt.yml", yaml);
 
@@ -213,7 +218,6 @@ completion: {}
     const yaml = `
 system_prompt: prompt.md
 tools: {}
-completion: {}
 `;
     const path = writeYaml("no-budget.yml", yaml);
 
@@ -232,7 +236,6 @@ completion: {}
     const yaml = `
 system_prompt: prompt.md
 token_budget: 50000
-completion: {}
 `;
     const path = writeYaml("no-tools.yml", yaml);
 
@@ -244,25 +247,6 @@ completion: {}
       expect(e).toBeInstanceOf(VesperError);
       expect((e as VesperError).code).toBe(1);
       expect((e as VesperError).message).toContain("tools");
-    }
-  });
-
-  it("exits with code 1 when completion key is absent", () => {
-    const yaml = `
-system_prompt: prompt.md
-token_budget: 50000
-tools: {}
-`;
-    const path = writeYaml("no-completion.yml", yaml);
-
-    expect(() => loadConfig(path)).toThrow(VesperError);
-
-    try {
-      loadConfig(path);
-    } catch (e) {
-      expect(e).toBeInstanceOf(VesperError);
-      expect((e as VesperError).code).toBe(1);
-      expect((e as VesperError).message).toContain("completion");
     }
   });
 
@@ -285,7 +269,6 @@ tools: {}
 system_prompt: 42
 token_budget: 50000
 tools: {}
-completion: {}
 `;
     const path = writeYaml("bad-prompt.yml", yaml);
 
@@ -305,7 +288,6 @@ completion: {}
 system_prompt: prompt.md
 token_budget: "not a number"
 tools: {}
-completion: {}
 `;
     const path = writeYaml("bad-budget.yml", yaml);
 
@@ -329,7 +311,6 @@ tools:
     - 1
     - 2
     - 3
-completion: {}
 `;
     const path = writeYaml("bad-read.yml", yaml);
 
@@ -344,54 +325,11 @@ completion: {}
     }
   });
 
-  it("exits with code 1 when completion.no_progress_limit is not a number", () => {
-    const yaml = `
-system_prompt: prompt.md
-token_budget: 50000
-tools: {}
-completion:
-  no_progress_limit: "five"
-`;
-    const path = writeYaml("bad-npl.yml", yaml);
-
-    expect(() => loadConfig(path)).toThrow(VesperError);
-
-    try {
-      loadConfig(path);
-    } catch (e) {
-      expect(e).toBeInstanceOf(VesperError);
-      expect((e as VesperError).code).toBe(1);
-      expect((e as VesperError).message).toContain("no_progress_limit");
-    }
-  });
-
-  it("exits with code 1 when completion.watch_file is not a string", () => {
-    const yaml = `
-system_prompt: prompt.md
-token_budget: 50000
-tools: {}
-completion:
-  watch_file: 42
-`;
-    const path = writeYaml("bad-wf.yml", yaml);
-
-    expect(() => loadConfig(path)).toThrow(VesperError);
-
-    try {
-      loadConfig(path);
-    } catch (e) {
-      expect(e).toBeInstanceOf(VesperError);
-      expect((e as VesperError).code).toBe(1);
-      expect((e as VesperError).message).toContain("watch_file");
-    }
-  });
-
   it("exits with code 1 when token_budget is zero", () => {
     const yaml = `
 system_prompt: prompt.md
 token_budget: 0
 tools: {}
-completion: {}
 `;
     const path = writeYaml("zero-budget.yml", yaml);
 
@@ -411,7 +349,6 @@ completion: {}
 system_prompt: prompt.md
 token_budget: -100
 tools: {}
-completion: {}
 `;
     const path = writeYaml("negative-budget.yml", yaml);
 
@@ -446,7 +383,6 @@ system_prompt: prompt.md
 token_budget: 50000
 model: 42
 tools: {}
-completion: {}
 `;
     const path = writeYaml("bad-model.yml", yaml);
 
@@ -467,7 +403,6 @@ system_prompt: prompt.md
 token_budget: 50000
 model: claude-sonnet-4-20250514
 tools: {}
-completion: {}
 `;
     const path = writeYaml("valid-model.yml", yaml);
     const config = loadConfig(path);
@@ -480,7 +415,6 @@ system_prompt: prompt.md
 token_budget: 50000
 command_timeout: 0
 tools: {}
-completion: {}
 `;
     const path = writeYaml("zero-timeout.yml", yaml);
 
@@ -501,7 +435,6 @@ system_prompt: prompt.md
 token_budget: 50000
 command_timeout: "fast"
 tools: {}
-completion: {}
 `;
     const path = writeYaml("string-timeout.yml", yaml);
 
@@ -522,7 +455,6 @@ system_prompt: prompt.md
 token_budget: 50000
 scratchpad: 42
 tools: {}
-completion: {}
 `;
     const path = writeYaml("bad-scratchpad.yml", yaml);
 
@@ -543,7 +475,6 @@ system_prompt: prompt.md
 token_budget: 50000
 scratchpad: /tmp/scratch.md
 tools: {}
-completion: {}
 `;
     const path = writeYaml("valid-scratchpad.yml", yaml);
     const config = loadConfig(path);
@@ -556,7 +487,6 @@ system_prompt: prompt.md
 token_budget: 50000
 skills: 42
 tools: {}
-completion: {}
 `;
     const path = writeYaml("bad-skills.yml", yaml);
 
@@ -577,7 +507,6 @@ system_prompt: prompt.md
 token_budget: 50000
 skills: .vesper/skills
 tools: {}
-completion: {}
 `;
     const path = writeYaml("valid-skills.yml", yaml);
     const config = loadConfig(path);

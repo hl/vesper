@@ -29,10 +29,6 @@ export interface AgentConfig {
     delete: string[];
     commands: string[];
   };
-  completion: {
-    watch_file: string | null;
-    no_progress_limit: number;
-  };
 }
 
 export interface ResolvedAgent {
@@ -111,13 +107,7 @@ export function loadConfig(configPath: string): AgentConfig {
     throw new VesperError(`Missing or invalid required key "tools" in ${configPath}`, 1);
   }
 
-  // Required: completion
-  if (!("completion" in parsed) || !isPlainObject(parsed.completion)) {
-    throw new VesperError(`Missing or invalid required key "completion" in ${configPath}`, 1);
-  }
-
   const tools = parsed.tools;
-  const completion = parsed.completion;
 
   // Validate tool arrays if present
   const toolRead = tools.read ?? [];
@@ -129,17 +119,6 @@ export function loadConfig(configPath: string): AgentConfig {
   assertStringArray(toolWrite, "tools.write");
   assertStringArray(toolDelete, "tools.delete");
   assertStringArray(toolCommands, "tools.commands");
-
-  // Validate completion fields
-  const watchFile = completion.watch_file ?? null;
-  if (watchFile !== null && typeof watchFile !== "string") {
-    throw new VesperError(`"completion.watch_file" must be a string or null`, 1);
-  }
-
-  const noProgressLimit = completion.no_progress_limit ?? 3;
-  if (typeof noProgressLimit !== "number") {
-    throw new VesperError(`"completion.no_progress_limit" must be a number`, 1);
-  }
 
   // Optional v0.2 fields
   const model = parsed.model;
@@ -217,10 +196,6 @@ export function loadConfig(configPath: string): AgentConfig {
       write: toolWrite,
       delete: toolDelete,
       commands: toolCommands,
-    },
-    completion: {
-      watch_file: watchFile,
-      no_progress_limit: noProgressLimit,
     },
   };
 }

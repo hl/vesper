@@ -1,10 +1,9 @@
 import type { Argv } from "yargs";
 import { runAgent } from "./agent.js";
-import { CompletionTracker } from "./completion.js";
 import { type AgentConfig, loadConfig, resolveAgent } from "./config.js";
 import { exitWithError, VesperError } from "./errors.js";
 import { init } from "./init.js";
-import { checkStaleSignals, getSignalPaths, writeComplete, writeFailed } from "./signals.js";
+import { checkStaleSignals, getSignalPaths, writeFailed } from "./signals.js";
 import { VERSION } from "./version.js";
 
 export const RESERVED_NAMES = ["init", "run", "help", "version"];
@@ -114,21 +113,6 @@ async function handleRun(agentName: string, cwd: string): Promise<void> {
     exitWithError(`System prompt file not found: ${vesperDir}/${config.system_prompt}`);
   }
   const systemPrompt = await systemPromptFile.text();
-
-  // Early completion check: if watch file is configured and already empty/missing,
-  // write complete signal and exit without making any API calls
-  if (config.completion.watch_file !== null) {
-    const tracker = new CompletionTracker(
-      config.completion.watch_file,
-      config.completion.no_progress_limit,
-      cwd,
-    );
-    const status = await tracker.check();
-    if (status === "complete") {
-      await writeComplete(signalPaths);
-      process.exit(0);
-    }
-  }
 
   // Read task prompt from stdin
   const taskPrompt = await Bun.stdin.text();
