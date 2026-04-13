@@ -16,7 +16,3 @@ tools:
     - "docs/reviews/**"
   delete: []
   commands: []
-
-completion:
-  watch_file: ~
-  no_progress_limit: 3

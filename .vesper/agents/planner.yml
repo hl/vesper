@@ -21,7 +21,3 @@ tools:
   delete:
     - "docs/plans/spec-queue.md"
   commands: []
-
-completion:
-  watch_file: "docs/plans/spec-queue.md"
-  no_progress_limit: 3

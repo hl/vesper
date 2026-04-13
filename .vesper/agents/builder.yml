@@ -25,7 +25,3 @@ tools:
     - "docs/plans/task-queue.md"
   commands:
     - "git commit"
-
-completion:
-  watch_file: "docs/plans/task-queue.md"
-  no_progress_limit: 3

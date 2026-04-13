@@ -138,17 +138,6 @@ describe("signals", () => {
   });
 
   describe("writeFailed", () => {
-    it("writes failed signal with no_progress reason", async () => {
-      const paths = defaultSignals();
-      await writeFailed(paths, "reviewer", "no_progress", "No changes detected");
-      expect(existsSync(paths.failed)).toBe(true);
-
-      const content = JSON.parse(readFileSync(paths.failed, "utf-8"));
-      expect(content.reason).toBe("no_progress");
-      expect(content.agent).toBe("reviewer");
-      expect(content.message).toBe("No changes detected");
-    });
-
     it("writes failed signal with error reason", async () => {
       const paths = defaultSignals();
       await writeFailed(paths, "coder", "error", "API request failed");

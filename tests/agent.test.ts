@@ -35,11 +35,6 @@ function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
       commands: [],
       ...(overrides?.tools ?? {}),
     },
-    completion: {
-      watch_file: null,
-      no_progress_limit: 3,
-      ...(overrides?.completion ?? {}),
-    },
   };
 }
 
@@ -141,18 +136,9 @@ describe("extractLastText", () => {
 });
 
 describe("runAgent", () => {
-  // 1. end_turn on first call — no watch_file configured (null)
-  //    With watch_file null, CompletionTracker always returns "continue",
-  //    so after the first iteration the loop continues.  But MAX_ITERATIONS
-  //    will eventually be hit and, since watch_file is null, the agent treats
-  //    it as complete.
-  //
-  //    To exercise the immediate-complete path, configure watch_file pointing
-  //    to a file that does not exist -> tracker returns "complete" on first check.
-  it("returns exit 0 and writes complete signal when watch_file does not exist", async () => {
-    const config = makeConfig({
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
-    });
+  // 1. end_turn on first call — writes complete signal and exits
+  it("returns exit 0 and writes complete signal on end_turn", async () => {
+    const config = makeConfig();
 
     const stubClient: MessageClient = {
       create: async () =>
@@ -163,7 +149,6 @@ describe("runAgent", () => {
         }),
     };
 
-    // tasks.txt does NOT exist in tempDir -> tracker returns "complete"
     const result = await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
 
     expect(result.exitCode).toBe(0);
@@ -270,9 +255,7 @@ describe("runAgent", () => {
 
   // 5. Tool execution: read_file permitted
   it("executes read_file when path matches allow-list and returns file content", async () => {
-    const config = makeConfig({
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
-    });
+    const config = makeConfig({});
 
     writeFileSync(join(tempDir, "data.txt"), "file-content-here");
 
@@ -319,7 +302,6 @@ describe("runAgent", () => {
   it("returns permission_denied when write_file path is outside allow-list", async () => {
     const config = makeConfig({
       tools: { read: ["**"], write: ["src/**"], delete: ["**"], commands: [] },
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedToolResult: string | undefined;
@@ -366,9 +348,7 @@ describe("runAgent", () => {
 
   // 7. Unknown tool name
   it("returns permission_denied for an unknown tool name", async () => {
-    const config = makeConfig({
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
-    });
+    const config = makeConfig({});
 
     let capturedToolResult: string | undefined;
     let callCount = 0;
@@ -404,65 +384,10 @@ describe("runAgent", () => {
     expect(parsed.error).toBe("permission_denied");
   });
 
-  // 8. No-progress detection
-  it("writes failed signal with 'no_progress' after no_progress_limit iterations without change", async () => {
-    // watch_file exists with unchanging content -> tracker increments no-progress counter
-    const config = makeConfig({
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
-    });
-
-    writeFileSync(join(tempDir, "tasks.txt"), "- task 1\n- task 2\n");
-
-    const stubClient: MessageClient = {
-      create: async () =>
-        makeMessage({
-          stop_reason: "end_turn",
-          usage: { input_tokens: 10, output_tokens: 10 },
-        }),
-    };
-
-    const result = await runAgent(config, "system", "task", tempDir, "stuck-agent", stubClient);
-
-    expect(result.exitCode).toBe(1);
-    const signalPath = join(tempDir, ".vesper-failed");
-    expect(existsSync(signalPath)).toBe(true);
-
-    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
-    expect(payload.reason).toBe("no_progress");
-    expect(payload.agent).toBe("stuck-agent");
-    expect(payload.message).toContain("3");
-  });
-
-  // 9. Completion: watch file empty
-  it("writes complete signal and exits 0 when watch file is empty after first iteration", async () => {
-    const config = makeConfig({
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
-    });
-
-    // Create an empty watch file
-    writeFileSync(join(tempDir, "tasks.txt"), "");
-
-    const stubClient: MessageClient = {
-      create: async () =>
-        makeMessage({
-          stop_reason: "end_turn",
-          usage: { input_tokens: 20, output_tokens: 10 },
-        }),
-    };
-
-    const result = await runAgent(config, "system", "task", tempDir, "done-agent", stubClient);
-
-    expect(result.exitCode).toBe(0);
-    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
-    // Should not have written a failed signal
-    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(false);
-  });
-
   // R1: Configurable model
   it("passes config.model to the API client when set", async () => {
     const config = makeConfig({
       model: "claude-opus-4-20250514",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -484,9 +409,7 @@ describe("runAgent", () => {
 
   // R2: Prompt caching — system is an array with cache_control
   it("sends system prompt as an array with cache_control for prompt caching", async () => {
-    const config = makeConfig({
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
-    });
+    const config = makeConfig({});
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
     const stubClient: MessageClient = {
@@ -517,7 +440,6 @@ describe("runAgent", () => {
   it("sends only read tools when write, delete, and commands are empty arrays", async () => {
     const config = makeConfig({
       tools: { read: ["**"], write: [], delete: [], commands: [] },
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -548,7 +470,6 @@ describe("runAgent", () => {
     const config = makeConfig({
       reveal_permissions: true,
       tools: { read: ["**"], write: ["src/**"], delete: ["**"], commands: [] },
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedToolResult: string | undefined;
@@ -595,7 +516,6 @@ describe("runAgent", () => {
     const config = makeConfig({
       reveal_permissions: false,
       tools: { read: ["**"], write: ["src/**"], delete: ["**"], commands: [] },
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedToolResult: string | undefined;
@@ -641,7 +561,6 @@ describe("runAgent", () => {
   it("injects scratchpad contents before the task prompt when scratchpad file exists", async () => {
     const config = makeConfig({
       scratchpad: "scratch.md",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     writeFileSync(join(tempDir, "scratch.md"), "Some previous context here.");
@@ -672,7 +591,6 @@ describe("runAgent", () => {
   it("sends plain task prompt when scratchpad file does not exist", async () => {
     const config = makeConfig({
       scratchpad: "nonexistent-scratch.md",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -697,9 +615,7 @@ describe("runAgent", () => {
 
   // R12: max_tokens truncation
   it("writes failed signal with truncated message when stop_reason is max_tokens", async () => {
-    const config = makeConfig({
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
-    });
+    const config = makeConfig({});
 
     const stubClient: MessageClient = {
       create: async () =>
@@ -736,7 +652,6 @@ describe("skill injection", () => {
 
     const config = makeConfig({
       skills: ".vesper/skills",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -769,7 +684,6 @@ describe("skill injection", () => {
 
     const config = makeConfig({
       skills: ".vesper/skills",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -794,7 +708,6 @@ describe("skill injection", () => {
   it("silently skips when skills directory does not exist", async () => {
     const config = makeConfig({
       skills: ".vesper/skills",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -821,7 +734,6 @@ describe("skill injection", () => {
 
     const config = makeConfig({
       skills: ".vesper/skills",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -846,7 +758,6 @@ describe("skill injection", () => {
 
     const config = makeConfig({
       skills: "skills-file",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -874,7 +785,6 @@ describe("skill injection", () => {
 
     const config = makeConfig({
       skills: ".vesper/skills",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -904,7 +814,6 @@ describe("skill injection", () => {
     const config = makeConfig({
       skills: ".vesper/skills",
       scratchpad: "scratch.md",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -941,7 +850,6 @@ describe("skill injection", () => {
 
     const config = makeConfig({
       skills: ".vesper/skills",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
@@ -968,7 +876,6 @@ describe("skill injection", () => {
 
     const config = makeConfig({
       scratchpad: "scratch.md",
-      completion: { watch_file: "tasks.txt", no_progress_limit: 3 },
     });
 
     let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;

@@ -12,17 +12,15 @@ describe("Logger", () => {
       return true;
     };
 
-    logger.iterationStart(1);
     logger.apiCall("claude-sonnet-4-20250514", 100, 200, 350);
     logger.toolCall("read", "src/main.ts", true, 12);
-    logger.completionCheck("in_progress");
     logger.signalWrite("done", "/tmp/done.txt");
     logger.skillsLoaded(3, 4096, ["a.md", "b.md", "c.md"]);
 
     process.stderr.write = original;
 
     const lines = captured.trim().split("\n");
-    expect(lines.length).toBe(6);
+    expect(lines.length).toBe(4);
 
     for (const line of lines) {
       const parsed = JSON.parse(line);
@@ -35,34 +33,26 @@ describe("Logger", () => {
     }
 
     // Verify event-specific fields
-    const iterationEvent = JSON.parse(lines[0]);
-    expect(iterationEvent.event).toBe("iteration_start");
-    expect(iterationEvent.iteration).toBe(1);
-
-    const apiCallEvent = JSON.parse(lines[1]);
+    const apiCallEvent = JSON.parse(lines[0]);
     expect(apiCallEvent.event).toBe("api_call");
     expect(apiCallEvent.model).toBe("claude-sonnet-4-20250514");
     expect(apiCallEvent.input_tokens).toBe(100);
     expect(apiCallEvent.output_tokens).toBe(200);
     expect(apiCallEvent.latency_ms).toBe(350);
 
-    const toolCallEvent = JSON.parse(lines[2]);
+    const toolCallEvent = JSON.parse(lines[1]);
     expect(toolCallEvent.event).toBe("tool_call");
     expect(toolCallEvent.tool).toBe("read");
     expect(toolCallEvent.target).toBe("src/main.ts");
     expect(toolCallEvent.permitted).toBe(true);
     expect(toolCallEvent.duration_ms).toBe(12);
 
-    const completionEvent = JSON.parse(lines[3]);
-    expect(completionEvent.event).toBe("completion_check");
-    expect(completionEvent.status).toBe("in_progress");
-
-    const signalEvent = JSON.parse(lines[4]);
+    const signalEvent = JSON.parse(lines[2]);
     expect(signalEvent.event).toBe("signal_write");
     expect(signalEvent.signal_type).toBe("done");
     expect(signalEvent.path).toBe("/tmp/done.txt");
 
-    const skillsEvent = JSON.parse(lines[5]);
+    const skillsEvent = JSON.parse(lines[3]);
     expect(skillsEvent.event).toBe("skills_loaded");
     expect(skillsEvent.file_count).toBe(3);
     expect(skillsEvent.total_bytes).toBe(4096);
@@ -79,10 +69,8 @@ describe("Logger", () => {
       return true;
     };
 
-    logger.iterationStart(1);
     logger.apiCall("claude-sonnet-4-20250514", 100, 200, 350);
     logger.toolCall("read", "src/main.ts", true, 12);
-    logger.completionCheck("in_progress");
     logger.signalWrite("done", "/tmp/done.txt");
     logger.skillsLoaded(2, 1024, ["x.md", "y.md"]);
 

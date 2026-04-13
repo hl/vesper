@@ -63,7 +63,7 @@ export async function writeNeedsApproval(
 export async function writeFailed(
   paths: SignalPaths,
   agent: string,
-  reason: "no_progress" | "error",
+  reason: "error",
   message: string,
   context?: string | null,
 ): Promise<void> {
