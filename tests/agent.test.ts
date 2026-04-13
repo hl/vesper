@@ -23,6 +23,7 @@ function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
     max_tool_result_size: overrides?.max_tool_result_size ?? 102400,
     scratchpad: overrides?.scratchpad ?? null,
     skills: overrides?.skills ?? null,
+    default_signal: overrides?.default_signal ?? "complete",
     context_files: overrides?.context_files ?? [],
     signals: overrides?.signals ?? {
       complete: ".vesper-complete",
@@ -958,5 +959,306 @@ describe("executeTool", () => {
     const result = await executeTool("read_file", "not-an-object", tempDir, config);
     const parsed = JSON.parse(result);
     expect(parsed.error).toBe("permission_denied");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Signal tool
+// ---------------------------------------------------------------------------
+
+describe("signal tool", () => {
+  it("writes complete signal when agent calls signal(complete)", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "complete" })],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    const result = await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+  });
+
+  it("writes needs_approval with agent reason when agent calls signal(needs_approval)", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("signal", {
+                type: "needs_approval",
+                message: "Task X needs review",
+              }),
+            ],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    const signalPath = join(tempDir, ".vesper-needs-approval");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("agent_needs_approval");
+    expect(payload.context).toBe("Task X needs review");
+  });
+
+  it("writes failed with agent reason when agent calls signal(failed)", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("signal", {
+                type: "failed",
+                message: "Dependency missing",
+              }),
+            ],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("agent_failed");
+    expect(payload.context).toBe("Dependency missing");
+  });
+
+  it("writes complete by default when default_signal is complete and no signal called", async () => {
+    const config = makeConfig({ default_signal: "complete" });
+    const stubClient: MessageClient = {
+      create: async () => makeMessage({ stop_reason: "end_turn" }),
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+  });
+
+  it("writes no signal file when default_signal is none and no signal called", async () => {
+    const config = makeConfig({ default_signal: "none" });
+    const stubClient: MessageClient = {
+      create: async () => makeMessage({ stop_reason: "end_turn" }),
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    const result = await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(false);
+    expect(existsSync(join(tempDir, ".vesper-needs-approval"))).toBe(false);
+    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(false);
+  });
+
+  it("conversation continues after signal tool call", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "complete" })],
+          });
+        }
+        if (callCount === 2) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "prompt.md" }, "toolu_read_1")],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(callCount).toBe(3);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+  });
+
+  it("last signal call wins when signal is called multiple times", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "complete" })],
+          });
+        }
+        if (callCount === 2) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock(
+                "signal",
+                {
+                  type: "needs_approval",
+                  message: "Changed mind",
+                },
+                "toolu_signal_2",
+              ),
+            ],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(false);
+    expect(existsSync(join(tempDir, ".vesper-needs-approval"))).toBe(true);
+    const payload = JSON.parse(readFileSync(join(tempDir, ".vesper-needs-approval"), "utf-8"));
+    expect(payload.reason).toBe("agent_needs_approval");
+  });
+
+  it("vesper API error overrides recorded signal (R12)", async () => {
+    const config = makeConfig();
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "complete" })],
+          });
+        }
+        // Second API call fails
+        throw new Error("API connection lost");
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    const result = await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(false);
+    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(true);
+    const payload = JSON.parse(readFileSync(join(tempDir, ".vesper-failed"), "utf-8"));
+    expect(payload.reason).toBe("error");
+  });
+
+  it("vesper budget exhaustion overrides recorded signal (R12)", async () => {
+    const config = makeConfig({ token_budget: 200 });
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "complete" })],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          });
+        }
+        // Second call exceeds budget
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    const result = await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(false);
+    expect(existsSync(join(tempDir, ".vesper-needs-approval"))).toBe(true);
+    const payload = JSON.parse(readFileSync(join(tempDir, ".vesper-needs-approval"), "utf-8"));
+    expect(payload.reason).toBe("token_budget_exceeded");
+  });
+
+  it("explicit signal overrides default_signal: none", async () => {
+    const config = makeConfig({ default_signal: "none" });
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("signal", { type: "complete" })],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+  });
+
+  it("signal tool works for agent with zero permission-gated tools", async () => {
+    const config = makeConfig({
+      tools: { read: [], write: [], delete: [], commands: [] },
+      default_signal: "none",
+    });
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("signal", {
+                type: "failed",
+                message: "Cannot proceed",
+              }),
+            ],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "prompt.md"), "test");
+    await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
+
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("agent_failed");
+    expect(payload.context).toBe("Cannot proceed");
   });
 });

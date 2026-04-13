@@ -60,10 +60,24 @@ export async function writeNeedsApproval(
   await Bun.write(paths.needsApproval, JSON.stringify(payload, null, 2));
 }
 
+export async function writeAgentNeedsApproval(
+  paths: SignalPaths,
+  agent: string,
+  message?: string,
+): Promise<void> {
+  const payload = {
+    reason: "agent_needs_approval",
+    agent,
+    message: message ?? "Agent requested approval",
+    context: message ?? null,
+  };
+  await Bun.write(paths.needsApproval, JSON.stringify(payload, null, 2));
+}
+
 export async function writeFailed(
   paths: SignalPaths,
   agent: string,
-  reason: "error",
+  reason: "error" | "agent_failed",
   message: string,
   context?: string | null,
 ): Promise<void> {

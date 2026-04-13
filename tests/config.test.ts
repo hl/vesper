@@ -567,4 +567,74 @@ tools: {}
       expect((e as VesperError).message).toContain("context_files");
     }
   });
+
+  it("parses default_signal: complete correctly", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+default_signal: complete
+tools: {}
+`;
+    const path = writeYaml("signal-complete.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.default_signal).toBe("complete");
+  });
+
+  it("parses default_signal: none correctly", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+default_signal: none
+tools: {}
+`;
+    const path = writeYaml("signal-none.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.default_signal).toBe("none");
+  });
+
+  it("defaults default_signal to complete when absent", () => {
+    const path = writeYaml("no-signal.yml", minimalYaml);
+    const config = loadConfig(path);
+    expect(config.default_signal).toBe("complete");
+  });
+
+  it("exits with code 1 when default_signal is an invalid string", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+default_signal: invalid
+tools: {}
+`;
+    const path = writeYaml("bad-signal.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("default_signal");
+    }
+  });
+
+  it("exits with code 1 when default_signal is a non-string value", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+default_signal: 123
+tools: {}
+`;
+    const path = writeYaml("numeric-signal.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("default_signal");
+    }
+  });
 });

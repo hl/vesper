@@ -23,6 +23,7 @@ export interface AgentConfig {
   scratchpad: string | null;
   skills: string | null;
   context_files: string[];
+  default_signal: "complete" | "none";
   signals: SignalConfig;
   tools: {
     read: string[];
@@ -155,6 +156,11 @@ export function loadConfig(configPath: string): AgentConfig {
     throw new VesperError(`"max_tool_result_size" must be a positive number in ${configPath}`, 1);
   }
 
+  const defaultSignal = parsed.default_signal ?? "complete";
+  if (defaultSignal !== "complete" && defaultSignal !== "none") {
+    throw new VesperError(`"default_signal" must be "complete" or "none" in ${configPath}`, 1);
+  }
+
   // v0.3: signals
   const signalsRaw = parsed.signals;
   let signals: SignalConfig;
@@ -192,6 +198,7 @@ export function loadConfig(configPath: string): AgentConfig {
     command_timeout: commandTimeout,
     command_env: commandEnv,
     max_tool_result_size: maxToolResultSize,
+    default_signal: defaultSignal,
     scratchpad,
     skills,
     context_files: contextFiles,

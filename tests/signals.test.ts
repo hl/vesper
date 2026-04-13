@@ -14,6 +14,7 @@ import {
   checkStaleSignals,
   getSignalPaths,
   type SignalPaths,
+  writeAgentNeedsApproval,
   writeComplete,
   writeFailed,
   writeNeedsApproval,
@@ -155,6 +156,65 @@ describe("signals", () => {
 
       const content = JSON.parse(readFileSync(paths.failed, "utf-8"));
       expect(content.context).toBe("Stuck on auth module");
+    });
+  });
+
+  describe("writeAgentNeedsApproval", () => {
+    it("writes needs-approval signal with agent reason and message as context", async () => {
+      const paths = defaultSignals();
+      await writeAgentNeedsApproval(paths, "builder", "Task X needs human review");
+
+      const content = JSON.parse(readFileSync(paths.needsApproval, "utf-8"));
+      expect(content.reason).toBe("agent_needs_approval");
+      expect(content.agent).toBe("builder");
+      expect(content.message).toBe("Task X needs human review");
+      expect(content.context).toBe("Task X needs human review");
+    });
+
+    it("writes null context when no message provided", async () => {
+      const paths = defaultSignals();
+      await writeAgentNeedsApproval(paths, "builder");
+
+      const content = JSON.parse(readFileSync(paths.needsApproval, "utf-8"));
+      expect(content.reason).toBe("agent_needs_approval");
+      expect(content.context).toBeNull();
+      expect(content.message).toBe("Agent requested approval");
+    });
+
+    it("treats empty string message as provided", async () => {
+      const paths = defaultSignals();
+      await writeAgentNeedsApproval(paths, "builder", "");
+
+      const content = JSON.parse(readFileSync(paths.needsApproval, "utf-8"));
+      expect(content.context).toBe("");
+      expect(content.message).toBe("");
+    });
+  });
+
+  describe("writeFailed with agent_failed reason", () => {
+    it("writes failed signal with agent_failed reason", async () => {
+      const paths = defaultSignals();
+      await writeFailed(
+        paths,
+        "builder",
+        "agent_failed",
+        "Dependency missing",
+        "Dependency missing",
+      );
+
+      const content = JSON.parse(readFileSync(paths.failed, "utf-8"));
+      expect(content.reason).toBe("agent_failed");
+      expect(content.agent).toBe("builder");
+      expect(content.message).toBe("Dependency missing");
+      expect(content.context).toBe("Dependency missing");
+    });
+
+    it("still accepts error reason (no regression)", async () => {
+      const paths = defaultSignals();
+      await writeFailed(paths, "builder", "error", "API error");
+
+      const content = JSON.parse(readFileSync(paths.failed, "utf-8"));
+      expect(content.reason).toBe("error");
     });
   });
 

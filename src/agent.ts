@@ -4,7 +4,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { AgentConfig } from "./config.js";
 import { Logger } from "./logger.js";
 import { checkCommandPermission, checkPathPermission, logDeniedCall } from "./permissions.js";
-import { getSignalPaths, writeComplete, writeFailed, writeNeedsApproval } from "./signals.js";
+import {
+  getSignalPaths,
+  writeAgentNeedsApproval,
+  writeComplete,
+  writeFailed,
+  writeNeedsApproval,
+} from "./signals.js";
 import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } from "./tools.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
@@ -111,6 +117,37 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
 ];
 
+// Signal tool is defined separately — it bypasses permission filtering and is always
+// available to all agents. This is a deliberate departure from structural permission
+// enforcement: the signal tool has no I/O and no safety surface.
+const SIGNAL_TOOL_DEFINITION: Anthropic.Tool = {
+  name: "signal",
+  description:
+    "Signal vesper how to exit this invocation. " +
+    'Use "complete" when all work is done. ' +
+    'Use "needs_approval" when human input is needed. ' +
+    'Use "failed" when the agent cannot proceed. ' +
+    "If you do not call this tool, the default exit behavior from the agent config applies.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      type: {
+        type: "string",
+        enum: ["complete", "needs_approval", "failed"],
+        description: "The signal type to write on exit",
+      },
+      message: {
+        type: "string",
+        description:
+          "Optional context message for needs_approval or failed signals. Ignored for complete.",
+      },
+    },
+    required: ["type"],
+    additionalProperties: false,
+  },
+  strict: true,
+};
+
 /**
  * Resolve a path and check if it is inside cwd.
  * Returns the resolved real path if inside cwd, or null if outside or unresolvable.
@@ -186,7 +223,8 @@ export function loadSkills(skillsDir: string, cwd: string, logger: Logger): stri
   return `[Skills]\n\n${parts.join("\n\n")}`;
 }
 
-// R3: Filter tool definitions to only include tools the agent has permission to use
+// R3: Filter tool definitions to only include tools the agent has permission to use.
+// The signal tool is always appended unconditionally (R11).
 function filterTools(config: AgentConfig): Anthropic.Tool[] {
   const toolPermissionMap: Record<string, string[]> = {
     read_file: config.tools.read,
@@ -200,11 +238,11 @@ function filterTools(config: AgentConfig): Anthropic.Tool[] {
     const list = toolPermissionMap[tool.name];
     return list !== undefined && list.length > 0;
   });
+  // Signal tool is always available — append after permission filtering
+  filtered.push(SIGNAL_TOOL_DEFINITION);
   // R2: Apply cache_control to the last tool definition for prompt caching
-  if (filtered.length > 0) {
-    const last = filtered[filtered.length - 1];
-    filtered[filtered.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
-  }
+  const last = filtered[filtered.length - 1];
+  filtered[filtered.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
   return filtered;
 }
 
@@ -358,9 +396,9 @@ export async function runAgent(
   // R1: Configurable model per agent
   const model = config.model ?? DEFAULT_MODEL;
 
-  // R3: Filter tools to match permissions; R2: cache_control applied inside filterTools
+  // R3: Filter tools to match permissions; R2: cache_control applied inside filterTools.
+  // Signal tool is always present, so tools is never empty.
   const tools = filterTools(config);
-  const toolsParam = tools.length > 0 ? tools : undefined;
 
   // R2: System prompt as structured content block with cache_control
   const systemBlocks: Anthropic.TextBlockParam[] = [
@@ -403,6 +441,10 @@ export async function runAgent(
 
   let messages: Anthropic.MessageParam[] = [{ role: "user", content: userContent }];
 
+  // Recorded signal from the agent's signal tool call (last call wins)
+  let recordedSignal: { type: "complete" | "needs_approval" | "failed"; message?: string } | null =
+    null;
+
   // Tool loop — model calls tools until it stops
   while (true) {
     let response: Anthropic.Message;
@@ -412,7 +454,7 @@ export async function runAgent(
         model,
         max_tokens: MAX_OUTPUT_TOKENS,
         system: systemBlocks,
-        tools: toolsParam,
+        tools,
         messages,
       });
     } catch (err) {
@@ -467,6 +509,21 @@ export async function runAgent(
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const toolUse of toolUseBlocks) {
+      // Intercept signal tool — records exit signal in local state, no I/O
+      if (toolUse.name === "signal") {
+        const input = toolUse.input as Record<string, unknown>;
+        const signalType = input.type as "complete" | "needs_approval" | "failed";
+        const signalMessage = typeof input.message === "string" ? input.message : undefined;
+        recordedSignal = { type: signalType, message: signalMessage };
+        logger.toolCall("signal", signalType, true, 0);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: JSON.stringify({ ok: true }),
+        });
+        continue;
+      }
+
       const toolStart = Date.now();
       const result = await executeTool(toolUse.name, toolUse.input, cwd, config);
       const toolDuration = Date.now() - toolStart;
@@ -495,8 +552,27 @@ export async function runAgent(
     ];
   }
 
-  // Conversation complete — write signal and exit
-  await writeComplete(signalPaths);
-  logger.signalWrite("complete", signalPaths.complete);
+  // Conversation complete — write signal based on recorded signal or default
+  if (recordedSignal?.type === "complete") {
+    await writeComplete(signalPaths);
+    logger.signalWrite("complete", signalPaths.complete);
+  } else if (recordedSignal?.type === "needs_approval") {
+    await writeAgentNeedsApproval(signalPaths, agentName, recordedSignal.message);
+    logger.signalWrite("needs_approval", signalPaths.needsApproval);
+  } else if (recordedSignal?.type === "failed") {
+    await writeFailed(
+      signalPaths,
+      agentName,
+      "agent_failed",
+      recordedSignal.message ?? "Agent signaled failure",
+      recordedSignal.message,
+    );
+    logger.signalWrite("failed", signalPaths.failed);
+  } else if (config.default_signal === "complete") {
+    await writeComplete(signalPaths);
+    logger.signalWrite("complete", signalPaths.complete);
+  }
+  // else: default_signal is "none" and no signal recorded — no file written, brr continues
+
   return { exitCode: 0 };
 }
