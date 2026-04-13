@@ -155,6 +155,33 @@ describe("patchFile", () => {
     expect(content).toBe("LINE ONE\nline 2\nline 3\nline 4\nLINE FIVE\nline 6\n");
   });
 
+  it("returns patch_failed when hunk line counts are malformed", async () => {
+    const filePath = join(tempDir, "test.txt");
+    await fsWriteFile(filePath, "line one\nline two\nline three\n");
+
+    // Hunk header says +1,2 (2 added lines) but only has 1 added line
+    const patch = [
+      "--- a/test.txt",
+      "+++ b/test.txt",
+      "@@ -1,3 +1,2 @@",
+      " line one",
+      "-line two",
+      "+line TWO",
+      " line three",
+      "",
+    ].join("\n");
+
+    const result = await patchFile(filePath, patch);
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toBe("patch_failed");
+    }
+
+    // File should be unmodified
+    const content = await fsReadFile(filePath, "utf-8");
+    expect(content).toBe("line one\nline two\nline three\n");
+  });
+
   it("returns not_found for a missing file", async () => {
     const result = await patchFile(join(tempDir, "nope.txt"), "some patch");
     expect(result).toEqual({ error: "not_found" });

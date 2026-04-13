@@ -76,7 +76,13 @@ export async function patchFile(
   }
 
   const current = await file.text();
-  const result = applyPatch(current, patch);
+  let result: string | false;
+  try {
+    result = applyPatch(current, patch);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { error: "patch_failed", detail: message };
+  }
 
   if (result === false) {
     return { error: "patch_failed", detail: "Patch hunks did not match file content" };
