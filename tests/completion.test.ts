@@ -82,14 +82,12 @@ describe("CompletionTracker", () => {
     expect(await tracker.check()).toBe("continue");
   });
 
-  it("returns 'continue' when no watch_file is configured", async () => {
+  it("returns 'complete' when no watch_file is configured", async () => {
     const tracker = new CompletionTracker(null, 3, tempDir);
 
-    // Should always return "continue" regardless of how many times called
-    expect(await tracker.check()).toBe("continue");
-    expect(await tracker.check()).toBe("continue");
-    expect(await tracker.check()).toBe("continue");
-    expect(await tracker.check()).toBe("continue");
+    // No watch_file means single-iteration mode — always complete after iteration ends
+    expect(await tracker.check()).toBe("complete");
+    expect(await tracker.check()).toBe("complete");
   });
 
   it("returns no_progress with noProgressLimit 1 on second unchanged check", async () => {

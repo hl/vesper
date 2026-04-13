@@ -15,7 +15,7 @@ export class CompletionTracker {
 
   async check(): Promise<"complete" | "continue" | "no_progress"> {
     if (this.watchFile === null) {
-      return "continue";
+      return "complete";
     }
 
     const resolved = join(this.cwd, this.watchFile);
