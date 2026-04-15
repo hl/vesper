@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
@@ -639,6 +647,59 @@ describe("runAgent", () => {
     expect(payload.agent).toBe("trunc-agent");
     expect(payload.message.toLowerCase()).toContain("truncated");
   });
+
+  // Tool execution error — executeTool throws, model receives error result
+  it("returns error tool_result to model when executeTool throws instead of aborting", async () => {
+    // Create a regular file that blocks mkdir -p when write_file tries to
+    // create intermediate directories through it. This causes writeFile to
+    // throw ENOTDIR, exercising the catch path in the tool loop.
+    writeFileSync(join(tempDir, "blocker"), "I am a file, not a directory");
+
+    const config = makeConfig();
+
+    let callCount = 0;
+    let toolResultContent: string | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              // write_file through a regular file triggers ENOTDIR in mkdir
+              makeToolUseBlock(
+                "write_file",
+                { path: "blocker/sub/file.txt", content: "data" },
+                "toolu_err",
+              ),
+            ],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        // Second call: model sees the tool result and finishes
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          const toolResult = lastMsg.content[0] as Anthropic.ToolResultBlockParam;
+          toolResultContent = toolResult.content as string;
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "err-agent", stubClient);
+
+    // The conversation should complete normally — not crash
+    expect(result.exitCode).toBe(0);
+    expect(callCount).toBe(2);
+    // The tool result should contain the internal_error from the catch path
+    expect(toolResultContent).toBeDefined();
+    const parsed = JSON.parse(toolResultContent as string);
+    expect(parsed.error).toBe("internal_error");
+    expect(parsed.message).toBeDefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -871,6 +932,44 @@ describe("skill injection", () => {
     expect(content).toContain("## valid.md");
     expect(content).not.toContain("ignored.txt");
     expect(content).not.toContain("also-ignored.yaml");
+  });
+
+  it("skips skill files that are symlinks pointing outside the skills directory", async () => {
+    const skillsDir = join(tempDir, ".vesper", "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(join(skillsDir, "legit.md"), "Legitimate skill.");
+
+    // Create an outside file and symlink it into the skills directory
+    const outsideDir = mkdtempSync(join(tmpdir(), "vesper-outside-"));
+    try {
+      writeFileSync(join(outsideDir, "secret.txt"), "Secret content.");
+      symlinkSync(join(outsideDir, "secret.txt"), join(skillsDir, "evil.md"));
+
+      const config = makeConfig({
+        skills: ".vesper/skills",
+      });
+
+      let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+      const stubClient: MessageClient = {
+        create: async (params) => {
+          capturedParams = params;
+          return makeMessage({
+            stop_reason: "end_turn",
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        },
+      };
+
+      await runAgent(config, "system", "task", tempDir, "symlink-skills-agent", stubClient);
+
+      const content = (capturedParams?.messages[0] as Anthropic.MessageParam).content as string;
+      expect(content).toContain("## legit.md");
+      expect(content).toContain("Legitimate skill.");
+      expect(content).not.toContain("Secret content.");
+      expect(content).not.toContain("## evil.md");
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 
   it("scratchpad still works after isInsideCwd refactor", async () => {

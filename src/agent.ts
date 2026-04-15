@@ -1,9 +1,15 @@
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { extname, resolve, sep } from "node:path";
+import { extname, resolve } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import type { AgentConfig } from "./config.js";
 import { Logger } from "./logger.js";
-import { checkCommandPermission, checkPathPermission, logDeniedCall } from "./permissions.js";
+import {
+  checkCommandPermission,
+  checkPathPermission,
+  isContained,
+  logDeniedCall,
+  resolveReal,
+} from "./permissions.js";
 import {
   getSignalPaths,
   writeAgentNeedsApproval,
@@ -159,17 +165,13 @@ export function isInsideCwd(targetPath: string, cwd: string): string | null {
   } catch {
     realCwd = cwd;
   }
-  const normalizedCwd = realCwd.endsWith(sep) ? realCwd : realCwd + sep;
-  let realTarget: string | null;
+  let realTarget: string;
   try {
     realTarget = realpathSync(targetPath);
   } catch {
-    realTarget = null;
+    return null;
   }
-  if (realTarget !== null && (realTarget === realCwd || realTarget.startsWith(normalizedCwd))) {
-    return realTarget;
-  }
-  return null;
+  return isContained(realTarget, realCwd) ? realTarget : null;
 }
 
 /**
@@ -207,7 +209,17 @@ export function loadSkills(skillsDir: string, cwd: string, logger: Logger): stri
 
   for (const filename of mdFiles) {
     try {
-      const content = readFileSync(resolve(realDir, filename), "utf-8");
+      const filePath = resolve(realDir, filename);
+      let realFile: string;
+      try {
+        realFile = realpathSync(filePath);
+      } catch {
+        continue; // Skip broken symlinks or inaccessible files
+      }
+      if (!isContained(realFile, realDir)) {
+        continue; // Skip symlinks pointing outside the skills directory
+      }
+      const content = readFileSync(realFile, "utf-8");
       if (content.trim().length === 0) continue;
       parts.push(`## ${filename}\n${content}`);
       loadedFiles.push(filename);
@@ -323,7 +335,9 @@ export async function executeTool(
       return denialResponse(config, toolName, path, perm.list);
     }
 
-    const resolvedPath = resolve(cwd, path);
+    // Use the symlink-resolved real path for I/O to prevent TOCTOU attacks.
+    // resolveReal is non-null here: checkPathPermission already verified it.
+    const resolvedPath = resolveReal(path, cwd) as string;
 
     switch (toolName) {
       case "read_file":
@@ -536,7 +550,13 @@ export async function runAgent(
       }
 
       const toolStart = Date.now();
-      const result = await executeTool(toolUse.name, toolUse.input, cwd, config);
+      let result: string;
+      try {
+        result = await executeTool(toolUse.name, toolUse.input, cwd, config);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        result = JSON.stringify({ error: "internal_error", message: errMsg });
+      }
       const toolDuration = Date.now() - toolStart;
       const parsed = JSON.parse(result) as Record<string, unknown>;
       const permitted = parsed.error !== "permission_denied";

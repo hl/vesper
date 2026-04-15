@@ -69,6 +69,20 @@ describe("checkPathPermission", () => {
   it("denies listing cwd root when glob does not match", () => {
     expect(checkPathPermission(".", cwd, ["src/**"])).toBe(false);
   });
+
+  it("permits write to new nested directories that do not exist yet", () => {
+    // new-dir/sub/ doesn't exist, but writeFile will create it with mkdir -p.
+    // The permission check should still pass if the pattern allows it.
+    expect(checkPathPermission("new-dir/sub/file.txt", cwd, ["**"])).toBe(true);
+  });
+
+  it("permits write to single new directory that does not exist yet", () => {
+    expect(checkPathPermission("brand-new/file.txt", cwd, ["brand-new/**"])).toBe(true);
+  });
+
+  it("denies write to new nested directory when pattern does not match", () => {
+    expect(checkPathPermission("new-dir/sub/file.txt", cwd, ["src/**"])).toBe(false);
+  });
 });
 
 describe("checkPathPermission — symlink escape", () => {

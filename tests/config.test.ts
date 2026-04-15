@@ -90,6 +90,16 @@ describe("resolveAgent", () => {
     }
   });
 
+  it("rejects agent names containing path separators", () => {
+    for (const badName of ["../escape", "foo/bar", "..\\escape", "foo\\bar"]) {
+      expect(() => resolveAgent(badName, join(tempDir, "project"), fakeHome)).toThrow(VesperError);
+    }
+  });
+
+  it("rejects agent names containing ..", () => {
+    expect(() => resolveAgent("..", join(tempDir, "project"), fakeHome)).toThrow(VesperError);
+  });
+
   it("shows migration hint when agent .yml exists at old .vesper/ path", () => {
     const oldDir = join(tempDir, "project", ".vesper");
     mkdirSync(oldDir, { recursive: true });
@@ -361,6 +371,48 @@ tools: {}
       expect((e as VesperError).code).toBe(1);
       expect((e as VesperError).message).toContain("token_budget");
     }
+  });
+
+  it("exits with code 1 when token_budget is NaN", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: .nan
+tools: {}
+`;
+    const path = writeYaml("nan-budget.yml", yaml);
+    expect(() => loadConfig(path)).toThrow(VesperError);
+  });
+
+  it("exits with code 1 when token_budget is Infinity", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: .inf
+tools: {}
+`;
+    const path = writeYaml("inf-budget.yml", yaml);
+    expect(() => loadConfig(path)).toThrow(VesperError);
+  });
+
+  it("exits with code 1 when command_timeout is NaN", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+command_timeout: .nan
+tools: {}
+`;
+    const path = writeYaml("nan-timeout.yml", yaml);
+    expect(() => loadConfig(path)).toThrow(VesperError);
+  });
+
+  it("exits with code 1 when max_tool_result_size is NaN", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+max_tool_result_size: .nan
+tools: {}
+`;
+    const path = writeYaml("nan-result-size.yml", yaml);
+    expect(() => loadConfig(path)).toThrow(VesperError);
   });
 
   it("exits with code 1 when config file does not exist", () => {

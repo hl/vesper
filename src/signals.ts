@@ -1,7 +1,8 @@
 import { existsSync, realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import type { SignalConfig } from "./config.js";
 import { VesperError } from "./errors.js";
+import { isContained, resolveReal } from "./permissions.js";
 
 function resolveSignalPath(cwd: string, name: string): string {
   let realCwd: string;
@@ -11,9 +12,15 @@ function resolveSignalPath(cwd: string, name: string): string {
     realCwd = cwd;
   }
   const resolved = resolve(realCwd, name);
-  const normalizedCwd = realCwd.endsWith(sep) ? realCwd : realCwd + sep;
-  if (resolved !== realCwd && !resolved.startsWith(normalizedCwd)) {
+  // Lexical containment check
+  if (!isContained(resolved, realCwd)) {
     throw new VesperError(`Signal file path "${name}" resolves outside cwd: ${resolved}`, 1);
+  }
+  // Symlink containment: resolve the existing portion (walking up ancestors
+  // for paths that don't exist yet) and re-check against real cwd
+  const real = resolveReal(name, realCwd);
+  if (real !== null && !isContained(real, realCwd)) {
+    throw new VesperError(`Signal file path "${name}" follows a symlink outside cwd`, 1);
   }
   return resolved;
 }

@@ -2,30 +2,43 @@ import { realpathSync } from "node:fs";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 import { minimatch } from "minimatch";
 
-function isInsideCwd(resolvedPath: string, cwd: string): boolean {
-  const normalizedCwd = cwd.endsWith(sep) ? cwd : cwd + sep;
-  return resolvedPath === cwd || resolvedPath.startsWith(normalizedCwd);
+/** Check if an absolute path is inside a container directory. */
+export function isContained(realPath: string, realContainer: string): boolean {
+  const normalized = realContainer.endsWith(sep) ? realContainer : realContainer + sep;
+  return realPath === realContainer || realPath.startsWith(normalized);
 }
 
 /**
  * Resolve a path to its real filesystem location, following symlinks.
  * For existing paths, uses realpathSync directly.
- * For non-existent paths (write targets), canonicalizes the parent
- * directory and appends the filename.
- * Returns null if the path cannot be resolved (e.g., parent doesn't exist).
+ * For non-existent paths (write targets), walks up to the nearest existing
+ * ancestor, resolves it, then reconstructs the remaining segments.
+ * Returns null if no existing ancestor can be found.
  */
-function resolveReal(inputPath: string, cwd: string): string | null {
+export function resolveReal(inputPath: string, cwd: string): string | null {
   const lexical = resolve(cwd, inputPath);
   try {
     return realpathSync(lexical);
   } catch {
-    // Path doesn't exist — canonicalize the parent for write targets
-    try {
-      const parent = realpathSync(dirname(lexical));
-      return resolve(parent, basename(lexical));
-    } catch {
-      // Parent doesn't exist either — deny
-      return null;
+    // Path doesn't exist — walk up to find the nearest existing ancestor,
+    // resolve it, then reconstruct the remaining segments.
+    // This supports writes to new nested directories (e.g., new-dir/sub/file.txt)
+    // where writeFile will create intermediates via mkdir -p.
+    const segments: string[] = [];
+    let current = lexical;
+    while (true) {
+      segments.unshift(basename(current));
+      const parent = dirname(current);
+      if (parent === current) {
+        // Reached filesystem root without finding an existing ancestor
+        return null;
+      }
+      try {
+        const realParent = realpathSync(parent);
+        return resolve(realParent, ...segments);
+      } catch {
+        current = parent;
+      }
     }
   }
 }
@@ -33,14 +46,14 @@ function resolveReal(inputPath: string, cwd: string): string | null {
 export function checkPathPermission(inputPath: string, cwd: string, allowList: string[]): boolean {
   // First: lexical check to catch obvious escapes cheaply
   const lexical = resolve(cwd, inputPath);
-  if (!isInsideCwd(lexical, cwd)) {
+  if (!isContained(lexical, cwd)) {
     return false;
   }
 
   // Second: resolve symlinks and re-check against real cwd
   const realCwd = realpathSync(cwd);
   const real = resolveReal(inputPath, cwd);
-  if (real === null || !isInsideCwd(real, realCwd)) {
+  if (real === null || !isContained(real, realCwd)) {
     return false;
   }
 

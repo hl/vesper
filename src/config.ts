@@ -39,6 +39,14 @@ export interface ResolvedAgent {
 }
 
 export function resolveAgent(name: string, cwd: string, home?: string): ResolvedAgent {
+  // Reject agent names that could traverse paths
+  if (name.includes("/") || name.includes("\\") || name.includes("..")) {
+    throw new VesperError(
+      `Invalid agent name "${name}": must not contain path separators or ".."`,
+      1,
+    );
+  }
+
   const homeDir = home ?? homedir();
   const vesperDirs = [join(cwd, ".vesper"), join(homeDir, ".config", "vesper")];
 
@@ -97,7 +105,11 @@ export function loadConfig(configPath: string): AgentConfig {
   }
 
   // Required: token_budget
-  if (!("token_budget" in parsed) || typeof parsed.token_budget !== "number") {
+  if (
+    !("token_budget" in parsed) ||
+    typeof parsed.token_budget !== "number" ||
+    !Number.isFinite(parsed.token_budget)
+  ) {
     throw new VesperError(`Missing or invalid required key "token_budget" in ${configPath}`, 1);
   }
   if (parsed.token_budget <= 0) {
@@ -129,7 +141,11 @@ export function loadConfig(configPath: string): AgentConfig {
   }
 
   const commandTimeout = parsed.command_timeout ?? 30;
-  if (typeof commandTimeout !== "number" || commandTimeout <= 0) {
+  if (
+    typeof commandTimeout !== "number" ||
+    !Number.isFinite(commandTimeout) ||
+    commandTimeout <= 0
+  ) {
     throw new VesperError(`"command_timeout" must be a positive number in ${configPath}`, 1);
   }
 
@@ -152,7 +168,11 @@ export function loadConfig(configPath: string): AgentConfig {
 
   // v0.3: max_tool_result_size
   const maxToolResultSize = parsed.max_tool_result_size ?? 102400;
-  if (typeof maxToolResultSize !== "number" || maxToolResultSize <= 0) {
+  if (
+    typeof maxToolResultSize !== "number" ||
+    !Number.isFinite(maxToolResultSize) ||
+    maxToolResultSize <= 0
+  ) {
     throw new VesperError(`"max_tool_result_size" must be a positive number in ${configPath}`, 1);
   }
 

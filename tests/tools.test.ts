@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readFile as fsReadFile, writeFile as fsWriteFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } from "../src/tools.js";
+import {
+  deleteFile,
+  listFiles,
+  patchFile,
+  readFile,
+  runCommand,
+  truncateResult,
+  writeFile,
+} from "../src/tools.js";
 
 let tempDir: string;
 
@@ -236,4 +244,35 @@ describe("runCommand", () => {
     expect(result.exit_code).toBe(124);
     expect(result.stderr).toContain("timed out");
   }, 10_000);
+});
+
+describe("truncateResult", () => {
+  it("returns content unchanged when within limit", () => {
+    const result = truncateResult("hello", 100);
+    expect(result).toBe("hello");
+  });
+
+  it("truncated output does not exceed the stated byte limit", () => {
+    const longContent = "x".repeat(10000);
+    const limit = 500;
+    const result = truncateResult(longContent, limit);
+    // The total byte size of the result must not exceed the limit
+    expect(Buffer.byteLength(result, "utf-8")).toBeLessThanOrEqual(limit);
+    expect(result).toContain("[truncated:");
+  });
+
+  it("stays within byte limit even with multi-byte characters", () => {
+    const emoji = "\u{1F600}".repeat(500); // 4 bytes each
+    const limit = 200;
+    const result = truncateResult(emoji, limit);
+    expect(Buffer.byteLength(result, "utf-8")).toBeLessThanOrEqual(limit);
+    expect(result).toContain("[truncated:");
+  });
+
+  it("stays within byte limit when limit is smaller than suffix", () => {
+    const longContent = "x".repeat(1000);
+    const limit = 10;
+    const result = truncateResult(longContent, limit);
+    expect(Buffer.byteLength(result, "utf-8")).toBeLessThanOrEqual(limit);
+  });
 });

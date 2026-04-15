@@ -1,10 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Argv } from "yargs";
 import { runAgent } from "./agent.js";
 import { type AgentConfig, loadConfig, resolveAgent } from "./config.js";
 import { exitWithError, VesperError } from "./errors.js";
 import { init } from "./init.js";
+import { isContained } from "./permissions.js";
 import { checkStaleSignals, getSignalPaths, writeFailed } from "./signals.js";
 import { VERSION } from "./version.js";
 
@@ -17,10 +18,23 @@ export function loadContextFiles(
   const loaded: string[] = [];
   const skipped: string[] = [];
   let content = "";
+  const realCwd = realpathSync(cwd);
   for (const file of files) {
     const filePath = resolve(cwd, file);
     if (existsSync(filePath)) {
-      const text = readFileSync(filePath, "utf-8");
+      let realPath: string;
+      try {
+        realPath = realpathSync(filePath);
+      } catch {
+        skipped.push(file);
+        continue;
+      }
+      if (!isContained(realPath, realCwd)) {
+        process.stderr.write(`[vesper] skipped context file outside cwd: ${file}\n`);
+        skipped.push(file);
+        continue;
+      }
+      const text = readFileSync(realPath, "utf-8");
       if (text.trim().length > 0) {
         content += `\n\n# ${file}\n\n${text}`;
         loaded.push(file);
@@ -133,35 +147,46 @@ async function handleRun(agentName: string, cwd: string): Promise<void> {
     exitWithError(`Stale signal file found: ${stale}. Clean up signal files before re-running.`);
   }
 
-  // Read system prompt — path in YAML is relative to vesperDir (.vesper/ or ~/.config/vesper/)
-  const systemPromptFile = Bun.file(`${vesperDir}/${config.system_prompt}`);
-  if (!(await systemPromptFile.exists())) {
-    exitWithError(`System prompt file not found: ${vesperDir}/${config.system_prompt}`);
-  }
-  let systemPrompt = await systemPromptFile.text();
-
-  // Append context files to system prompt (paths resolved relative to cwd)
-  if (config.context_files.length > 0) {
-    const result = loadContextFiles(config.context_files, cwd);
-    if (result.content.length > 0) {
-      systemPrompt += result.content;
-    }
-  }
-
-  // Read task prompt from stdin
-  const taskPrompt = await Bun.stdin.text();
-  if (!taskPrompt.trim()) {
-    exitWithError("No task prompt provided on stdin");
-  }
-
-  // Run the agent
+  // All I/O from here can fail — wrap in try-catch to emit signal files on error
   try {
+    // Read system prompt — path in YAML is relative to vesperDir (.vesper/ or ~/.config/vesper/)
+    const systemPromptPath = resolve(vesperDir, config.system_prompt);
+    const realVesperDir = realpathSync(vesperDir);
+    let realSystemPromptPath: string;
+    try {
+      realSystemPromptPath = realpathSync(systemPromptPath);
+    } catch {
+      throw new VesperError(`System prompt file not found: ${systemPromptPath}`, 1);
+    }
+    if (!isContained(realSystemPromptPath, realVesperDir)) {
+      throw new VesperError(
+        `System prompt path "${config.system_prompt}" resolves outside vesper directory`,
+        1,
+      );
+    }
+    let systemPrompt = readFileSync(realSystemPromptPath, "utf-8");
+
+    // Append context files to system prompt (paths resolved relative to cwd)
+    if (config.context_files.length > 0) {
+      const result = loadContextFiles(config.context_files, cwd);
+      if (result.content.length > 0) {
+        systemPrompt += result.content;
+      }
+    }
+
+    // Read task prompt from stdin
+    const taskPrompt = await Bun.stdin.text();
+    if (!taskPrompt.trim()) {
+      throw new VesperError("No task prompt provided on stdin", 1);
+    }
+
+    // Run the agent
     const result = await runAgent(config, systemPrompt, taskPrompt, cwd, agentName);
     process.exit(result.exitCode);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await writeFailed(signalPaths, agentName, "error", `Unexpected error: ${message}`);
-    process.exit(1);
+    await writeFailed(signalPaths, agentName, "error", message);
+    exitWithError(message);
   }
 }
 

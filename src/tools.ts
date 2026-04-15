@@ -7,9 +7,15 @@ const DEFAULT_ENV_KEYS = ["PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR"];
 export function truncateResult(content: string, limit: number): string {
   const bytes = Buffer.byteLength(content, "utf-8");
   if (bytes <= limit) return content;
-  // Truncate by slicing the buffer to avoid splitting multi-byte chars
-  const truncated = Buffer.from(content, "utf-8").subarray(0, limit).toString("utf-8");
-  return `${truncated}\n[truncated: showing first ${limit} bytes of ${bytes} bytes]`;
+  const suffix = `\n[truncated: showing first ${limit} of ${bytes} bytes]`;
+  const suffixBytes = Buffer.byteLength(suffix, "utf-8");
+  if (suffixBytes >= limit) {
+    // Limit too small to fit suffix — hard-truncate with no metadata
+    return Buffer.from(content, "utf-8").subarray(0, limit).toString("utf-8");
+  }
+  const contentLimit = limit - suffixBytes;
+  const truncated = Buffer.from(content, "utf-8").subarray(0, contentLimit).toString("utf-8");
+  return `${truncated}${suffix}`;
 }
 
 export async function readFile(
@@ -135,9 +141,14 @@ export async function runCommand(
     });
 
     let timedOut = false;
+    let hardKillTimer: ReturnType<typeof setTimeout> | undefined;
     const timer = setTimeout(() => {
       timedOut = true;
-      proc.kill();
+      proc.kill(); // SIGTERM
+      // If the process doesn't exit within 5s of SIGTERM, send SIGKILL
+      hardKillTimer = setTimeout(() => {
+        proc.kill(9); // SIGKILL
+      }, 5000);
     }, timeoutSeconds * 1000);
 
     const [stdout, stderr] = await Promise.all([
@@ -147,6 +158,7 @@ export async function runCommand(
 
     await proc.exited;
     clearTimeout(timer);
+    if (hardKillTimer !== undefined) clearTimeout(hardKillTimer);
 
     if (timedOut) {
       return {

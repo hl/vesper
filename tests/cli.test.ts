@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import yargs from "yargs";
@@ -155,5 +155,37 @@ describe("loadContextFiles", () => {
     expect(result.loaded).toEqual(["docs/rules.md"]);
     expect(result.content).toContain("# docs/rules.md");
     expect(result.content).toContain("Some rules.");
+  });
+
+  it("skips context files that traverse outside cwd via ..", () => {
+    // Create a file outside the temp dir to simulate escape
+    const outsideDir = mkdtempSync(join(tmpdir(), "vesper-outside-"));
+    try {
+      writeFileSync(join(outsideDir, "secret.txt"), "top secret");
+
+      const result = loadContextFiles([`../../${outsideDir.split("/").pop()}/secret.txt`], tempDir);
+
+      expect(result.loaded).toEqual([]);
+      expect(result.skipped.length).toBe(1);
+      expect(result.content).toBe("");
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips context files that are symlinks pointing outside cwd", () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), "vesper-outside-"));
+    try {
+      writeFileSync(join(outsideDir, "secret.txt"), "top secret");
+      symlinkSync(join(outsideDir, "secret.txt"), join(tempDir, "sneaky-link.txt"));
+
+      const result = loadContextFiles(["sneaky-link.txt"], tempDir);
+
+      expect(result.loaded).toEqual([]);
+      expect(result.skipped.length).toBe(1);
+      expect(result.content).toBe("");
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 });

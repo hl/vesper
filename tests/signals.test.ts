@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -68,6 +70,23 @@ describe("signals", () => {
           failed: "../../etc/cron.d/backdoor",
         }),
       ).toThrow(VesperError);
+    });
+
+    it("rejects signal paths through symlinked directories", () => {
+      const outsideDir = mkdtempSync(join(tmpdir(), "vesper-outside-"));
+      try {
+        mkdirSync(join(tempDir, "logs-parent"), { recursive: true });
+        symlinkSync(outsideDir, join(tempDir, "logs-parent", "logs"));
+        expect(() =>
+          getSignalPaths(tempDir, {
+            complete: ".vesper-complete",
+            needs_approval: ".vesper-needs-approval",
+            failed: "logs-parent/logs/fail.json",
+          }),
+        ).toThrow(VesperError);
+      } finally {
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
     });
 
     it("rejects absolute signal paths", () => {
