@@ -67,7 +67,7 @@ export function checkCommandPermission(
   allowList: string[],
 ): boolean {
   for (const entry of allowList) {
-    const parts = entry.split(" ");
+    const parts = entry.trim().split(/\s+/);
     if (parts.length === 1) {
       if (command === parts[0]) return true;
     } else {

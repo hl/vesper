@@ -153,4 +153,10 @@ describe("checkCommandPermission", () => {
   it("denies when allow list is empty", () => {
     expect(checkCommandPermission("mix", ["test"], [])).toBe(false);
   });
+
+  it("handles entries with extra whitespace", () => {
+    const list = ["git  commit", "  mix   test  "];
+    expect(checkCommandPermission("git", ["commit"], list)).toBe(true);
+    expect(checkCommandPermission("mix", ["test"], list)).toBe(true);
+  });
 });
