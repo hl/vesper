@@ -508,70 +508,38 @@ export async function runAgent(
       compactionAttempted = true;
       const beforeTokens = estimatedContextTokens;
 
+      // Helper: best-effort scratchpad write (used by budget check and R14 paths)
+      const writeScratchpad = async (summary: string) => {
+        if (config.scratchpad === null) return;
+        try {
+          let realCwd: string;
+          try {
+            realCwd = realpathSync(cwd);
+          } catch {
+            realCwd = cwd;
+          }
+          const scratchpadPath = resolve(realCwd, config.scratchpad);
+          if (isContained(scratchpadPath, realCwd)) {
+            await Bun.write(scratchpadPath, summary);
+          }
+        } catch {
+          // Best-effort: scratchpad write failure should not derail compaction
+        }
+      };
+
+      let summary: string;
       try {
-        const { summary, usage: compactionUsage } = await compactConversation(
+        const { summary: s, usage: compactionUsage } = await compactConversation(
           messagesClient,
           compactionModel,
           messages,
           userContent,
         );
+        summary = s;
 
         // R8: Count compaction usage against token budget
         totalInputTokens += compactionUsage.input_tokens;
         totalOutputTokens += compactionUsage.output_tokens;
-
-        // Check token budget after compaction (may trigger needs_approval)
-        if (totalInputTokens + totalOutputTokens >= config.token_budget) {
-          await writeNeedsApproval(
-            signalPaths,
-            agentName,
-            config.token_budget,
-            totalInputTokens,
-            totalOutputTokens,
-            null,
-          );
-          logger.signalWrite("needs_approval", signalPaths.needsApproval);
-          return { exitCode: 0 };
-        }
-
-        // R5: Replace messages with single user message containing original task + summary
-        messages = [
-          {
-            role: "user",
-            content: `[Original Task]\n${userContent}\n\n[Conversation Summary]\n${summary}`,
-          },
-        ];
-
-        // Re-estimate after compaction
-        estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
-
-        logger.contextCompacted(beforeTokens, estimatedContextTokens);
-
-        // R14: If still over compaction threshold after compaction, write scratchpad + needs_approval
-        if (estimatedContextTokens > compactionLimit) {
-          // Write summary to scratchpad if configured.
-          // Use lexical containment (not isInsideCwd) because the file may not exist yet.
-          // Resolve relative to the real cwd to handle symlinks (e.g. /tmp -> /private/tmp on macOS).
-          if (config.scratchpad !== null) {
-            let realCwd: string;
-            try {
-              realCwd = realpathSync(cwd);
-            } catch {
-              realCwd = cwd;
-            }
-            const scratchpadPath = resolve(realCwd, config.scratchpad);
-            if (isContained(scratchpadPath, realCwd)) {
-              await Bun.write(scratchpadPath, summary);
-            }
-          }
-          await writeAgentNeedsApproval(
-            signalPaths,
-            agentName,
-            `Context still exceeds threshold after compaction (${estimatedContextTokens} tokens > ${Math.round(compactionLimit)} limit)`,
-          );
-          logger.signalWrite("needs_approval", signalPaths.needsApproval);
-          return { exitCode: 0 };
-        }
       } catch (err) {
         // R9: Compaction failure writes failed signal
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -583,6 +551,50 @@ export async function runAgent(
         );
         logger.signalWrite("failed", signalPaths.failed);
         return { exitCode: 1 };
+      }
+
+      // Check token budget after compaction (may trigger needs_approval).
+      // Write scratchpad first so the summary survives for the next invocation.
+      if (totalInputTokens + totalOutputTokens >= config.token_budget) {
+        await writeScratchpad(summary);
+        await writeNeedsApproval(
+          signalPaths,
+          agentName,
+          config.token_budget,
+          totalInputTokens,
+          totalOutputTokens,
+          null,
+        );
+        logger.signalWrite("needs_approval", signalPaths.needsApproval);
+        return { exitCode: 0 };
+      }
+
+      // R5: Replace messages with single user message containing original task + summary
+      messages = [
+        {
+          role: "user",
+          content: `[Original Task]\n${userContent}\n\n[Conversation Summary]\n${summary}`,
+        },
+      ];
+
+      // Clear stale stub metadata — old tool_use_ids no longer exist in messages
+      stubMetadata.clear();
+
+      // Re-estimate after compaction
+      estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
+
+      logger.contextCompacted(beforeTokens, estimatedContextTokens);
+
+      // R14: If still over compaction threshold after compaction, write scratchpad + needs_approval
+      if (estimatedContextTokens > compactionLimit) {
+        await writeScratchpad(summary);
+        await writeAgentNeedsApproval(
+          signalPaths,
+          agentName,
+          `Context still exceeds threshold after compaction (${estimatedContextTokens} tokens > ${Math.round(compactionLimit)} limit)`,
+        );
+        logger.signalWrite("needs_approval", signalPaths.needsApproval);
+        return { exitCode: 0 };
       }
     }
 

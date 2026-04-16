@@ -207,12 +207,13 @@ describe("generateStub", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildStubMetadata", () => {
-  it("builds metadata for read_file", () => {
+  it("builds metadata for read_file with correct line count", () => {
     const result = JSON.stringify({ content: "line1\nline2\nline3" });
     const meta = buildStubMetadata("read_file", { path: "src/app.ts" }, result);
     expect(meta.toolName).toBe("read_file");
     expect(meta.target).toBe("src/app.ts");
-    expect(meta.outcome).toContain("lines");
+    // 2 newlines in "line1\nline2\nline3" = 2 lines (newline count)
+    expect(meta.outcome).toBe("2 lines");
     expect(meta.size).toBeDefined();
   });
 

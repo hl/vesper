@@ -116,8 +116,19 @@ export function buildStubMetadata(
     case "read_file":
     case "list_files": {
       const path = typeof input.path === "string" ? input.path : "unknown";
-      const lineCount = (resultString.match(/\n/g) || []).length;
-      const byteSize = Buffer.byteLength(resultString, "utf-8");
+      // Parse the JSON result to count newlines in the actual file content,
+      // not the JSON-escaped string where \n becomes two chars (backslash + n).
+      let content = resultString;
+      try {
+        const parsed = JSON.parse(resultString) as Record<string, unknown>;
+        if (typeof parsed.content === "string") {
+          content = parsed.content;
+        }
+      } catch {
+        // Fall back to raw string if JSON parsing fails
+      }
+      const lineCount = (content.match(/\n/g) || []).length;
+      const byteSize = Buffer.byteLength(content, "utf-8");
       const sizeStr = formatSize(byteSize);
       return {
         toolName,
