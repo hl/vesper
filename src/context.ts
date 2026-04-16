@@ -103,90 +103,82 @@ export function generateStub(meta: StubMetadata): string {
   return `[${meta.toolName}: ${meta.target} — ${meta.outcome}]`;
 }
 
+/** Parse a tool result JSON string, returning {} on failure. */
+function safeParseResult(resultString: string): Record<string, unknown> {
+  try {
+    return JSON.parse(resultString) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+/** Extract outcome from a parsed tool result: "ok" or "error: <message>". */
+function parseOutcome(parsed: Record<string, unknown>): string {
+  return parsed.error ? `error: ${String(parsed.error)}` : "ok";
+}
+
+/** Count newlines via charcode scan (avoids regex match array allocation). */
+function countNewlines(text: string): number {
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) count++;
+  }
+  return count;
+}
+
 /**
  * Build StubMetadata from a tool execution result.
  * Called after tool execution in the agent loop, using the post-truncation result string.
+ * Accepts an optional pre-parsed result to avoid double JSON.parse.
  */
 export function buildStubMetadata(
   toolName: string,
   input: Record<string, unknown>,
   resultString: string,
+  parsed?: Record<string, unknown>,
 ): StubMetadata {
+  const result = parsed ?? safeParseResult(resultString);
+
   switch (toolName) {
     case "read_file":
     case "list_files": {
       const path = typeof input.path === "string" ? input.path : "unknown";
-      // Parse the JSON result to count newlines in the actual file content,
-      // not the JSON-escaped string where \n becomes two chars (backslash + n).
-      let content = resultString;
-      try {
-        const parsed = JSON.parse(resultString) as Record<string, unknown>;
-        if (typeof parsed.content === "string") {
-          content = parsed.content;
-        }
-      } catch {
-        // Fall back to raw string if JSON parsing fails
-      }
-      const lineCount = (content.match(/\n/g) || []).length;
+      // Count newlines in the actual file content, not the JSON envelope
+      const content = typeof result.content === "string" ? result.content : resultString;
+      const lineCount = countNewlines(content);
       const byteSize = Buffer.byteLength(content, "utf-8");
-      const sizeStr = formatSize(byteSize);
       return {
         toolName,
         target: path,
         outcome: `${lineCount} lines`,
-        size: sizeStr,
+        size: formatSize(byteSize),
       };
     }
     case "write_file":
     case "delete_file": {
       const path = typeof input.path === "string" ? input.path : "unknown";
-      let outcome = "ok";
-      try {
-        const parsed = JSON.parse(resultString) as Record<string, unknown>;
-        if (parsed.error) {
-          outcome = `error: ${String(parsed.error)}`;
-        }
-      } catch {
-        // keep "ok" default
-      }
-      return { toolName, target: path, outcome };
+      return { toolName, target: path, outcome: parseOutcome(result) };
     }
     case "patch_file": {
       const path = typeof input.path === "string" ? input.path : "unknown";
-      let outcome = "ok";
       let hunkCount: number | undefined;
-      try {
-        const parsed = JSON.parse(resultString) as Record<string, unknown>;
-        if (parsed.error) {
-          outcome = `error: ${String(parsed.error)}`;
-        }
-      } catch {
-        // keep "ok" default
-      }
-      // Count hunks from the patch input
       if (typeof input.patch === "string") {
         hunkCount = (input.patch.match(/^@@\s/gm) || []).length;
       }
-      const size = hunkCount !== undefined ? `${hunkCount} hunks` : undefined;
-      return { toolName, target: path, outcome, size };
+      return {
+        toolName,
+        target: path,
+        outcome: parseOutcome(result),
+        size: hunkCount !== undefined ? `${hunkCount} hunks` : undefined,
+      };
     }
     case "run_command": {
       const command = typeof input.command === "string" ? input.command : "unknown";
       const args = Array.isArray(input.args) ? (input.args as string[]).join(" ") : "";
       const target = args ? `${command} ${args}` : command;
-      let exitCode = 0;
-      let stdoutSize = 0;
-      try {
-        const parsed = JSON.parse(resultString) as Record<string, unknown>;
-        if (typeof parsed.exit_code === "number") {
-          exitCode = parsed.exit_code;
-        }
-        if (typeof parsed.stdout === "string") {
-          stdoutSize = Buffer.byteLength(parsed.stdout, "utf-8");
-        }
-      } catch {
-        // keep defaults
-      }
+      const exitCode = typeof result.exit_code === "number" ? result.exit_code : 0;
+      const stdoutSize =
+        typeof result.stdout === "string" ? Buffer.byteLength(result.stdout, "utf-8") : 0;
       return {
         toolName,
         target,
@@ -195,21 +187,10 @@ export function buildStubMetadata(
       };
     }
     case "signal": {
-      // Signal tool results are simple `{ ok: true }` or error objects
-      let outcome = "ok";
-      try {
-        const parsed = JSON.parse(resultString) as Record<string, unknown>;
-        if (parsed.error) {
-          outcome = `error: ${String(parsed.error)}`;
-        }
-      } catch {
-        // keep "ok" default
-      }
       const signalType = typeof input.type === "string" ? input.type : "unknown";
-      return { toolName, target: signalType, outcome };
+      return { toolName, target: signalType, outcome: parseOutcome(result) };
     }
     default: {
-      // Unknown tool — use generic metadata
       const target =
         typeof input.path === "string"
           ? input.path
@@ -354,18 +335,12 @@ export function pruneMessages(
       continue;
     }
 
-    // msg.content is an array of ContentBlockParam (since we checked !Array.isArray above)
+    // Array.isArray guard above ensures msg.content is ContentBlockParam[]
     const contentArr = msg.content as Exclude<Anthropic.MessageParam["content"], string>;
     const newContent: typeof contentArr = [];
     let messageModified = false;
 
     for (const block of contentArr) {
-      if (typeof block === "string") {
-        // String content in user messages — pass through
-        newContent.push(block as unknown as (typeof contentArr)[number]);
-        continue;
-      }
-
       if (block.type !== "tool_result") {
         newContent.push(block);
         continue;

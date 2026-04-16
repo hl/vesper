@@ -496,19 +496,19 @@ export async function runAgent(
   const compactionThreshold = config.context_management.compaction_threshold;
   const compactionModel = config.context_management.compaction_model ?? model;
 
+  const contextLimit = 0.95 * modelWindow;
+  const compactionLimit = compactionThreshold * modelWindow;
+
   // Tool loop — model calls tools until it stops
   while (true) {
     // Pre-call context guard: estimate context and fail gracefully at 95% of model window
     let estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
-    const contextLimit = 0.95 * modelWindow;
-
-    // Compaction check: fires before the 95% guard and at the compaction threshold
-    const compactionLimit = compactionThreshold * modelWindow;
     if (compactionEnabled && !compactionAttempted && estimatedContextTokens > compactionLimit) {
       compactionAttempted = true;
       const beforeTokens = estimatedContextTokens;
 
-      // Helper: best-effort scratchpad write (used by budget check and R14 paths)
+      // Helper: best-effort scratchpad write (used by budget check and R14 paths).
+      // Uses lexical containment (not isInsideCwd) because the file may not exist yet.
       const writeScratchpad = async (summary: string) => {
         if (config.scratchpad === null) return;
         try {
@@ -644,13 +644,11 @@ export async function runAgent(
     totalOutputTokens += response.usage.output_tokens;
     logger.apiCall(model, response.usage.input_tokens, response.usage.output_tokens, callLatency);
 
-    // Post-call estimation drift detection: compare estimate against actual input tokens.
-    // If the ratio diverges beyond 30%, emit a warning for operator visibility.
-    const actualInputTokens = response.usage.input_tokens;
-    if (actualInputTokens > 0) {
-      const ratio = estimatedContextTokens / actualInputTokens;
+    // Post-call estimation drift detection: warn when heuristic diverges >30% from actual.
+    if (response.usage.input_tokens > 0) {
+      const ratio = estimatedContextTokens / response.usage.input_tokens;
       if (ratio > 1.3 || ratio < 0.7) {
-        logger.contextEstimationDrift(estimatedContextTokens, actualInputTokens, ratio);
+        logger.contextEstimationDrift(estimatedContextTokens, response.usage.input_tokens, ratio);
       }
     }
 
@@ -734,23 +732,21 @@ export async function runAgent(
       const toolDuration = Date.now() - toolStart;
       const parsed = JSON.parse(result) as Record<string, unknown>;
       const permitted = parsed.error !== "permission_denied";
+      const inp = toolUse.input as Record<string, unknown>;
       const target =
-        typeof (toolUse.input as Record<string, unknown>)?.path === "string"
-          ? ((toolUse.input as Record<string, unknown>).path as string)
-          : typeof (toolUse.input as Record<string, unknown>)?.command === "string"
-            ? ((toolUse.input as Record<string, unknown>).command as string)
+        typeof inp.path === "string"
+          ? inp.path
+          : typeof inp.command === "string"
+            ? inp.command
             : toolUse.name;
-      logger.toolCall(toolUse.name, target as string, permitted, toolDuration);
+      logger.toolCall(toolUse.name, target, permitted, toolDuration);
 
       toolResults.push({
         type: "tool_result",
         tool_use_id: toolUse.id,
         content: result,
       });
-      stubMetadata.set(
-        toolUse.id,
-        buildStubMetadata(toolUse.name, toolUse.input as Record<string, unknown>, result),
-      );
+      stubMetadata.set(toolUse.id, buildStubMetadata(toolUse.name, inp, result, parsed));
     }
 
     // Prune prior turn tool results before appending new turn
