@@ -50,4 +50,11 @@ export class Logger {
   contextEstimationDrift(estimated: number, actual: number, ratio: number): void {
     this.emit("context_estimation_drift", { estimated, actual, ratio });
   }
+
+  contextPruned(messagesPruned: number, estimatedTokensSaved: number): void {
+    this.emit("context_pruned", {
+      messages_pruned: messagesPruned,
+      estimated_tokens_saved: estimatedTokensSaved,
+    });
+  }
 }

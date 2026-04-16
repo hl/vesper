@@ -2,6 +2,13 @@ import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
 import type { AgentConfig } from "./config.js";
+import {
+  buildStubMetadata,
+  estimatePayloadTokens,
+  getModelContextWindow,
+  pruneMessages,
+  type StubMetadata,
+} from "./context.js";
 import { Logger } from "./logger.js";
 import {
   checkCommandPermission,
@@ -475,6 +482,10 @@ export async function runAgent(
   let recordedSignal: { type: "complete" | "needs_approval" | "failed"; message?: string } | null =
     null;
 
+  // Stub metadata for tool result pruning (keyed by tool_use_id)
+  const stubMetadata: Map<string, StubMetadata> = new Map();
+  const modelWindow = getModelContextWindow(model, logger);
+
   // Tool loop — model calls tools until it stops
   while (true) {
     let response: Anthropic.Message;
@@ -554,24 +565,28 @@ export async function runAgent(
         const input = toolUse.input as Record<string, unknown>;
         const rawType = input.type;
         if (rawType !== "complete" && rawType !== "needs_approval" && rawType !== "failed") {
+          const errContent = JSON.stringify({
+            error: "invalid_signal_type",
+            message: `Invalid signal type: ${String(rawType)}. Must be "complete", "needs_approval", or "failed".`,
+          });
           toolResults.push({
             type: "tool_result",
             tool_use_id: toolUse.id,
-            content: JSON.stringify({
-              error: "invalid_signal_type",
-              message: `Invalid signal type: ${String(rawType)}. Must be "complete", "needs_approval", or "failed".`,
-            }),
+            content: errContent,
           });
+          stubMetadata.set(toolUse.id, buildStubMetadata("signal", input, errContent));
           continue;
         }
         const signalMessage = typeof input.message === "string" ? input.message : undefined;
         recordedSignal = { type: rawType, message: signalMessage };
         logger.toolCall("signal", rawType, true, 0);
+        const signalContent = JSON.stringify({ ok: true });
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
-          content: JSON.stringify({ ok: true }),
+          content: signalContent,
         });
+        stubMetadata.set(toolUse.id, buildStubMetadata("signal", input, signalContent));
         continue;
       }
 
@@ -599,11 +614,38 @@ export async function runAgent(
         tool_use_id: toolUse.id,
         content: result,
       });
+      stubMetadata.set(
+        toolUse.id,
+        buildStubMetadata(toolUse.name, toolUse.input as Record<string, unknown>, result),
+      );
+    }
+
+    // Prune prior turn tool results before appending new turn
+    const estimatedTokens = estimatePayloadTokens(systemBlocks, tools, [
+      ...messages,
+      { role: "assistant", content: response.content },
+      { role: "user", content: toolResults },
+    ]);
+    const { messages: prunedMessages, prunedCount } = pruneMessages(
+      messages,
+      stubMetadata,
+      config.context_management.pruning,
+      estimatedTokens,
+      config.context_management.pruning_threshold,
+      modelWindow,
+    );
+    if (prunedCount > 0) {
+      const afterTokens = estimatePayloadTokens(systemBlocks, tools, [
+        ...prunedMessages,
+        { role: "assistant", content: response.content },
+        { role: "user", content: toolResults },
+      ]);
+      logger.contextPruned(prunedCount, estimatedTokens - afterTokens);
     }
 
     // Append assistant response and tool results for next round
     messages = [
-      ...messages,
+      ...prunedMessages,
       { role: "assistant", content: response.content },
       { role: "user", content: toolResults },
     ];

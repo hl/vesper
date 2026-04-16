@@ -1549,6 +1549,347 @@ describe("isContextLengthError", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Tool result pruning integration tests
+// ---------------------------------------------------------------------------
+
+describe("tool result pruning", () => {
+  it("prunes prior turn read_file results when pruning is always", async () => {
+    const config = makeConfig({
+      context_management: {
+        pruning: "always",
+        pruning_threshold: 0.7,
+        compaction_enabled: false,
+        compaction_threshold: 0.8,
+        compaction_model: null,
+      },
+    });
+
+    writeFileSync(join(tempDir, "data.txt"), "line1\nline2\nline3\n");
+
+    let callCount = 0;
+    let thirdCallMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          // First call: model reads a file
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "data.txt" }, "toolu_r1")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        if (callCount === 2) {
+          // Second call: model reads again
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "data.txt" }, "toolu_r2")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        // Third call: capture the messages to verify pruning
+        thirdCallMessages = params.messages;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "prune-agent", stubClient);
+    expect(result.exitCode).toBe(0);
+    expect(callCount).toBe(3);
+
+    // Verify messages sent to API on the third call:
+    // messages[0]: user task (unchanged)
+    // messages[1]: assistant tool_use
+    // messages[2]: user tool_result (first turn — should be pruned)
+    // messages[3]: assistant tool_use
+    // messages[4]: user tool_result (second turn — most recent, not pruned)
+    expect(thirdCallMessages).toBeDefined();
+    const msgs = thirdCallMessages as Anthropic.MessageParam[];
+
+    // messages[0] unchanged
+    expect(msgs[0].content).toBe("task");
+
+    // messages[2] should be pruned (first turn's tool result)
+    const firstToolResult = msgs[2].content as Anthropic.ToolResultBlockParam[];
+    expect(firstToolResult[0].tool_use_id).toBe("toolu_r1");
+    const stubContent = firstToolResult[0].content as string;
+    expect(stubContent).toContain("[read_file:");
+    expect(stubContent).toContain("data.txt");
+    // Stub should NOT contain the original file content
+    expect(stubContent).not.toContain("line1");
+
+    // messages[4] should NOT be pruned (most recent turn)
+    const lastToolResult = msgs[4].content as Anthropic.ToolResultBlockParam[];
+    expect(lastToolResult[0].tool_use_id).toBe("toolu_r2");
+    const lastContent = lastToolResult[0].content as string;
+    // Should still contain the full JSON result
+    expect(lastContent).toContain("line1");
+  });
+
+  it("does not prune messages when pruning is off", async () => {
+    const config = makeConfig({
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: false,
+        compaction_threshold: 0.8,
+        compaction_model: null,
+      },
+    });
+
+    writeFileSync(join(tempDir, "data.txt"), "original-content");
+
+    let callCount = 0;
+    let secondCallMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "data.txt" }, "toolu_1")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        if (callCount === 2) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "data.txt" }, "toolu_2")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        secondCallMessages = params.messages;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "nopruneagent", stubClient);
+    expect(callCount).toBe(3);
+
+    // Verify first turn's tool result is NOT pruned
+    const msgs = secondCallMessages as Anthropic.MessageParam[];
+    const firstToolResult = msgs[2].content as Anthropic.ToolResultBlockParam[];
+    const content = firstToolResult[0].content as string;
+    expect(content).toContain("original-content");
+  });
+
+  it("prunes write_file results with correct stub format", async () => {
+    const config = makeConfig({
+      context_management: {
+        pruning: "always",
+        pruning_threshold: 0.7,
+        compaction_enabled: false,
+        compaction_threshold: 0.8,
+        compaction_model: null,
+      },
+    });
+
+    let callCount = 0;
+    let thirdCallMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("write_file", { path: "out.txt", content: "data" }, "toolu_w1"),
+            ],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        if (callCount === 2) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "out.txt" }, "toolu_r1")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        thirdCallMessages = params.messages;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "write-prune-agent", stubClient);
+    expect(callCount).toBe(3);
+
+    const msgs = thirdCallMessages as Anthropic.MessageParam[];
+    const firstToolResult = msgs[2].content as Anthropic.ToolResultBlockParam[];
+    expect(firstToolResult[0].content).toBe("[write_file: out.txt — ok]");
+  });
+
+  it("prunes run_command results with correct stub format", async () => {
+    const config = makeConfig({
+      tools: { read: ["**"], write: ["**"], delete: ["**"], commands: ["echo"] },
+      context_management: {
+        pruning: "always",
+        pruning_threshold: 0.7,
+        compaction_enabled: false,
+        compaction_threshold: 0.8,
+        compaction_model: null,
+      },
+    });
+
+    let callCount = 0;
+    let thirdCallMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("run_command", { command: "echo", args: ["hello"] }, "toolu_c1"),
+            ],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        if (callCount === 2) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "out.txt" }, "toolu_r1")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        thirdCallMessages = params.messages;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "out.txt"), "dummy");
+
+    await runAgent(config, "system", "task", tempDir, "cmd-prune-agent", stubClient);
+    expect(callCount).toBe(3);
+
+    const msgs = thirdCallMessages as Anthropic.MessageParam[];
+    const firstToolResult = msgs[2].content as Anthropic.ToolResultBlockParam[];
+    const stub = firstToolResult[0].content as string;
+    expect(stub).toContain("[run_command:");
+    expect(stub).toContain("echo hello");
+    expect(stub).toContain("exit 0");
+    expect(stub).toContain("stdout");
+  });
+
+  it("preserves tool_use_id linkage across pruned messages", async () => {
+    const config = makeConfig({
+      context_management: {
+        pruning: "always",
+        pruning_threshold: 0.7,
+        compaction_enabled: false,
+        compaction_threshold: 0.8,
+        compaction_model: null,
+      },
+    });
+
+    writeFileSync(join(tempDir, "a.txt"), "content-a");
+
+    let callCount = 0;
+    let thirdCallMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "a.txt" }, "toolu_link_1")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        if (callCount === 2) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "a.txt" }, "toolu_link_2")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        thirdCallMessages = params.messages;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "linkage-agent", stubClient);
+
+    const msgs = thirdCallMessages as Anthropic.MessageParam[];
+
+    // Check that the assistant tool_use id matches the following user tool_result id
+    // for the pruned first turn
+    const assistantContent = msgs[1].content as Anthropic.ContentBlock[];
+    const toolUse = assistantContent.find((b) => b.type === "tool_use") as Anthropic.ToolUseBlock;
+    const toolResult = (msgs[2].content as Anthropic.ToolResultBlockParam[])[0];
+    expect(toolResult.tool_use_id).toBe(toolUse.id);
+    expect(toolResult.tool_use_id).toBe("toolu_link_1");
+  });
+
+  it("threshold mode does not prune when below threshold", async () => {
+    const config = makeConfig({
+      context_management: {
+        pruning: "threshold",
+        pruning_threshold: 0.7,
+        compaction_enabled: false,
+        compaction_threshold: 0.8,
+        compaction_model: null,
+      },
+    });
+
+    writeFileSync(join(tempDir, "tiny.txt"), "x");
+
+    let callCount = 0;
+    let thirdCallMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "tiny.txt" }, "toolu_t1")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        if (callCount === 2) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "tiny.txt" }, "toolu_t2")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        thirdCallMessages = params.messages;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "thresh-agent", stubClient);
+    expect(callCount).toBe(3);
+
+    // With tiny messages the estimated tokens should be well below 70% of 200k
+    // so no pruning should occur
+    const msgs = thirdCallMessages as Anthropic.MessageParam[];
+    const firstToolResult = msgs[2].content as Anthropic.ToolResultBlockParam[];
+    const content = firstToolResult[0].content as string;
+    // Should NOT be a stub — should still contain original content
+    expect(content).toContain("x");
+    expect(content).not.toContain("[read_file:");
+  });
+});
+
 describe("context-length error in runAgent", () => {
   it("writes failed signal with 'Context window overflow' for context-length BadRequestError", async () => {
     const config = makeConfig();

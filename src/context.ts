@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import type { ContextManagementConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 
 /**
@@ -70,4 +71,244 @@ export function getModelContextWindow(model: string, logger?: Logger): number {
     logger.contextWindowUnknown(model, DEFAULT_CONTEXT_WINDOW);
   }
   return DEFAULT_CONTEXT_WINDOW;
+}
+
+// ---------------------------------------------------------------------------
+// Stub metadata & pruning
+// ---------------------------------------------------------------------------
+
+/**
+ * Metadata captured from a tool result during execution, used to generate
+ * a compact stub string when pruning old tool results.
+ */
+export interface StubMetadata {
+  toolName: string;
+  /** File path or command string — the primary "target" of the tool call. */
+  target: string;
+  /** "ok" | "error" | specific status for the outcome column. */
+  outcome: string;
+  /** Optional size info (e.g. "142 lines, 3KB" or "12KB stdout"). */
+  size?: string;
+}
+
+/**
+ * Generate a compact stub string from metadata.
+ * Format: `[tool_name: target — outcome, size]` or `[tool_name: target — outcome]`
+ */
+export function generateStub(meta: StubMetadata): string {
+  if (meta.size) {
+    return `[${meta.toolName}: ${meta.target} — ${meta.outcome}, ${meta.size}]`;
+  }
+  return `[${meta.toolName}: ${meta.target} — ${meta.outcome}]`;
+}
+
+/**
+ * Build StubMetadata from a tool execution result.
+ * Called after tool execution in the agent loop, using the post-truncation result string.
+ */
+export function buildStubMetadata(
+  toolName: string,
+  input: Record<string, unknown>,
+  resultString: string,
+): StubMetadata {
+  switch (toolName) {
+    case "read_file":
+    case "list_files": {
+      const path = typeof input.path === "string" ? input.path : "unknown";
+      const lineCount = (resultString.match(/\n/g) || []).length;
+      const byteSize = Buffer.byteLength(resultString, "utf-8");
+      const sizeStr = formatSize(byteSize);
+      return {
+        toolName,
+        target: path,
+        outcome: `${lineCount} lines`,
+        size: sizeStr,
+      };
+    }
+    case "write_file":
+    case "delete_file": {
+      const path = typeof input.path === "string" ? input.path : "unknown";
+      let outcome = "ok";
+      try {
+        const parsed = JSON.parse(resultString) as Record<string, unknown>;
+        if (parsed.error) {
+          outcome = `error: ${String(parsed.error)}`;
+        }
+      } catch {
+        // keep "ok" default
+      }
+      return { toolName, target: path, outcome };
+    }
+    case "patch_file": {
+      const path = typeof input.path === "string" ? input.path : "unknown";
+      let outcome = "ok";
+      let hunkCount: number | undefined;
+      try {
+        const parsed = JSON.parse(resultString) as Record<string, unknown>;
+        if (parsed.error) {
+          outcome = `error: ${String(parsed.error)}`;
+        }
+      } catch {
+        // keep "ok" default
+      }
+      // Count hunks from the patch input
+      if (typeof input.patch === "string") {
+        hunkCount = (input.patch.match(/^@@\s/gm) || []).length;
+      }
+      const size = hunkCount !== undefined ? `${hunkCount} hunks` : undefined;
+      return { toolName, target: path, outcome, size };
+    }
+    case "run_command": {
+      const command = typeof input.command === "string" ? input.command : "unknown";
+      const args = Array.isArray(input.args) ? (input.args as string[]).join(" ") : "";
+      const target = args ? `${command} ${args}` : command;
+      let exitCode = 0;
+      let stdoutSize = 0;
+      try {
+        const parsed = JSON.parse(resultString) as Record<string, unknown>;
+        if (typeof parsed.exit_code === "number") {
+          exitCode = parsed.exit_code;
+        }
+        if (typeof parsed.stdout === "string") {
+          stdoutSize = Buffer.byteLength(parsed.stdout, "utf-8");
+        }
+      } catch {
+        // keep defaults
+      }
+      return {
+        toolName,
+        target,
+        outcome: `exit ${exitCode}`,
+        size: `${formatSize(stdoutSize)} stdout`,
+      };
+    }
+    case "signal": {
+      // Signal tool results are simple `{ ok: true }` or error objects
+      let outcome = "ok";
+      try {
+        const parsed = JSON.parse(resultString) as Record<string, unknown>;
+        if (parsed.error) {
+          outcome = `error: ${String(parsed.error)}`;
+        }
+      } catch {
+        // keep "ok" default
+      }
+      const signalType = typeof input.type === "string" ? input.type : "unknown";
+      return { toolName, target: signalType, outcome };
+    }
+    default: {
+      // Unknown tool — use generic metadata
+      const target =
+        typeof input.path === "string"
+          ? input.path
+          : typeof input.command === "string"
+            ? input.command
+            : toolName;
+      return { toolName, target, outcome: "ok" };
+    }
+  }
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  return `${Math.round(bytes / 1024)}KB`;
+}
+
+/**
+ * Prune tool results from prior turns by replacing their content with stub strings.
+ *
+ * - `off`: return messages unchanged
+ * - `always`: replace tool_result content in all user messages with tool results
+ * - `threshold`: same as `always` but only when estimatedTokens > threshold * modelWindow
+ *
+ * Returns a new array (shallow copy); original messages are not mutated.
+ * messages[0] (initial user task) is never modified.
+ *
+ * R3 (most recent turn protection) is handled by the caller: this function is called
+ * on the existing messages array BEFORE the current turn's tool results are appended,
+ * so the current turn is never in the input.
+ */
+export function pruneMessages(
+  messages: Anthropic.MessageParam[],
+  metadata: Map<string, StubMetadata>,
+  strategy: ContextManagementConfig["pruning"],
+  estimatedTokens: number,
+  threshold: number,
+  modelWindow: number,
+): { messages: Anthropic.MessageParam[]; prunedCount: number } {
+  if (strategy === "off") {
+    return { messages, prunedCount: 0 };
+  }
+
+  if (strategy === "threshold" && estimatedTokens <= threshold * modelWindow) {
+    return { messages, prunedCount: 0 };
+  }
+
+  let prunedCount = 0;
+  const result: Anthropic.MessageParam[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    // Never modify messages[0] (initial user task) or non-user messages
+    if (i === 0 || msg.role !== "user") {
+      result.push(msg);
+      continue;
+    }
+
+    // Only prune user messages that contain tool_result blocks (array content)
+    if (!Array.isArray(msg.content)) {
+      result.push(msg);
+      continue;
+    }
+
+    // msg.content is an array of ContentBlockParam (since we checked !Array.isArray above)
+    const contentArr = msg.content as Exclude<Anthropic.MessageParam["content"], string>;
+    const newContent: typeof contentArr = [];
+    let messageModified = false;
+
+    for (const block of contentArr) {
+      if (typeof block === "string") {
+        // String content in user messages — pass through
+        newContent.push(block as unknown as (typeof contentArr)[number]);
+        continue;
+      }
+
+      if (block.type !== "tool_result") {
+        newContent.push(block);
+        continue;
+      }
+
+      const toolResult = block;
+
+      // Skip blocks with array content (unexpected format per plan)
+      if (Array.isArray(toolResult.content)) {
+        newContent.push(toolResult);
+        continue;
+      }
+
+      const meta = metadata.get(toolResult.tool_use_id);
+      if (meta) {
+        const stub = generateStub(meta);
+        newContent.push({
+          type: "tool_result",
+          tool_use_id: toolResult.tool_use_id,
+          content: stub,
+        });
+        prunedCount++;
+        messageModified = true;
+      } else {
+        // No metadata — leave unchanged
+        newContent.push(toolResult);
+      }
+    }
+
+    if (messageModified) {
+      result.push({ role: "user", content: newContent });
+    } else {
+      result.push(msg);
+    }
+  }
+
+  return { messages: result, prunedCount };
 }
