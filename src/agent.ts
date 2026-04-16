@@ -507,8 +507,6 @@ export async function runAgent(
       compactionAttempted = true;
       const beforeTokens = estimatedContextTokens;
 
-      // Helper: best-effort scratchpad write (used by budget check and R14 paths).
-      // Uses lexical containment (not isInsideCwd) because the file may not exist yet.
       const writeScratchpad = async (summary: string) => {
         if (config.scratchpad === null) return;
         try {
@@ -519,9 +517,10 @@ export async function runAgent(
             realCwd = cwd;
           }
           const scratchpadPath = resolve(realCwd, config.scratchpad);
-          if (isContained(scratchpadPath, realCwd)) {
-            await Bun.write(scratchpadPath, summary);
-          }
+          if (!isContained(scratchpadPath, realCwd)) return;
+          const real = resolveReal(config.scratchpad, realCwd);
+          if (real !== null && !isContained(real, realCwd)) return;
+          await Bun.write(scratchpadPath, summary);
         } catch {
           // Best-effort: scratchpad write failure should not derail compaction
         }

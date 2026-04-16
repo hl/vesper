@@ -2721,6 +2721,58 @@ describe("conversation compaction", () => {
     expect(payload.message).toContain("Context still exceeds threshold after compaction");
   });
 
+  it("refuses to write scratchpad through a symlink pointing outside cwd", async () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), "vesper-outside-"));
+    const outsideScratchpad = join(outsideDir, "escape.md");
+    writeFileSync(outsideScratchpad, "");
+
+    // Create symlink inside cwd pointing outside
+    symlinkSync(outsideScratchpad, join(tempDir, "scratch-link.md"));
+
+    const config = makeConfig({
+      scratchpad: "scratch-link.md",
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.05,
+        compaction_model: null,
+      },
+    });
+
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          const hugeSummary = `Summary: ${"y".repeat(50_000)}`;
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock(hugeSummary)],
+            usage: { input_tokens: 500, output_tokens: 200 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    await runAgent(config, "system", "task", tempDir, "symlink-scratch-agent", stubClient);
+
+    // Scratchpad outside cwd should NOT have been overwritten
+    expect(readFileSync(outsideScratchpad, "utf-8")).toBe("");
+
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
   it("compaction fires only once per invocation — compactionAttempted prevents re-triggering", async () => {
     const config = compactionConfig();
 
