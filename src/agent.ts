@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
 import type { AgentConfig } from "./config.js";
 import { Logger } from "./logger.js";
 import {
@@ -22,6 +22,22 @@ import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } fro
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const MAX_OUTPUT_TOKENS = 4096;
 const MAX_CONTEXT_LENGTH = 1000;
+
+const CONTEXT_OVERFLOW_PATTERNS = [
+  "prompt is too long",
+  "maximum context length",
+  "context window",
+  "exceeds the maximum",
+  "too many tokens",
+];
+
+export function isContextLengthError(err: unknown): err is BadRequestError {
+  return (
+    err instanceof BadRequestError &&
+    err.type === "invalid_request_error" &&
+    CONTEXT_OVERFLOW_PATTERNS.some((p) => err.message.toLowerCase().includes(p))
+  );
+}
 
 export function extractLastText(response: Anthropic.Message): string | null {
   for (let i = response.content.length - 1; i >= 0; i--) {
@@ -472,6 +488,16 @@ export async function runAgent(
         messages,
       });
     } catch (err) {
+      if (isContextLengthError(err)) {
+        await writeFailed(
+          signalPaths,
+          agentName,
+          "error",
+          `Context window overflow: ${err.message}`,
+        );
+        logger.signalWrite("failed", signalPaths.failed);
+        return { exitCode: 1 };
+      }
       const message = err instanceof Error ? err.message : String(err);
       await writeFailed(signalPaths, agentName, "error", `API error: ${message}`);
       logger.signalWrite("failed", signalPaths.failed);
