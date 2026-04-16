@@ -1890,6 +1890,250 @@ describe("tool result pruning", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Pre-call context guard (Unit 5)
+// ---------------------------------------------------------------------------
+
+describe("pre-call context guard", () => {
+  it("proceeds normally when estimated context is at 50% of model window", async () => {
+    // Default model window is 200k. With a small system prompt and task,
+    // estimated context will be well below 95% (190k tokens).
+    const config = makeConfig();
+
+    const stubClient: MessageClient = {
+      create: async () =>
+        makeMessage({
+          stop_reason: "end_turn",
+          content: [makeTextBlock("Done.")],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "guard-ok-agent", stubClient);
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(false);
+  });
+
+  it("writes failed signal when estimated context exceeds 95% of model window", async () => {
+    // Generate a massive user message that will push context over 95% of 200k.
+    // 200k * 0.95 = 190k tokens. At chars/3 heuristic, we need ~570k chars.
+    const hugeTask = "x".repeat(600_000);
+    const config = makeConfig();
+
+    const stubClient: MessageClient = {
+      create: async () =>
+        makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+    };
+
+    const result = await runAgent(
+      config,
+      "system",
+      hugeTask,
+      tempDir,
+      "guard-fail-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(1);
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("error");
+    expect(payload.agent).toBe("guard-fail-agent");
+    expect(payload.message).toContain("Estimated context size");
+    expect(payload.message).toContain("exceeds 95% of model window");
+    expect(payload.message).toContain("200000");
+  });
+
+  it("proceeds when estimated context is at 94.9% (just under threshold)", async () => {
+    // 200k * 0.95 = 190k tokens. We need estimated tokens just under 190k.
+    // At chars/3, 190k tokens = ~570k chars. We need slightly less.
+    // estimatePayloadTokens includes system, tools, and messages.
+    // We'll construct a task that brings us just under the threshold.
+    // With JSON serialization overhead, the exact numbers shift. Let's compute
+    // what we need: we need the total of system+tools+messages < 190k tokens.
+    // System and tools are small (~few hundred tokens). We need the message to be ~189k tokens.
+    // At chars/3 = 189k, we need ~567k chars of message. But JSON.stringify adds
+    // quotes and escaping overhead, so we go slightly under.
+    // Use 560k chars — should be close to 94% and under 95%.
+    const task = "y".repeat(560_000);
+    const config = makeConfig();
+
+    let apiCalled = false;
+    const stubClient: MessageClient = {
+      create: async () => {
+        apiCalled = true;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        });
+      },
+    };
+
+    const result = await runAgent(config, "system", task, tempDir, "guard-under-agent", stubClient);
+
+    expect(result.exitCode).toBe(0);
+    expect(apiCalled).toBe(true);
+    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(false);
+  });
+
+  it("fires context guard on the very first API call", async () => {
+    // If the system prompt + initial task is already over 95%, the guard
+    // should fire before the first API call ever happens.
+    const hugeSystem = "s".repeat(600_000);
+    const config = makeConfig();
+
+    let apiCalled = false;
+    const stubClient: MessageClient = {
+      create: async () => {
+        apiCalled = true;
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    const result = await runAgent(
+      config,
+      hugeSystem,
+      "task",
+      tempDir,
+      "guard-first-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(apiCalled).toBe(false);
+    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(true);
+
+    const payload = JSON.parse(readFileSync(join(tempDir, ".vesper-failed"), "utf-8"));
+    expect(payload.message).toContain("Estimated context size");
+    expect(payload.message).toContain("exceeds 95% of model window");
+  });
+
+  it("emits context_guard_triggered logger event when guard fires", async () => {
+    const hugeTask = "x".repeat(600_000);
+    const config = makeConfig({ log_events: true });
+
+    const stubClient: MessageClient = {
+      create: async () => makeMessage({ stop_reason: "end_turn" }),
+    };
+
+    let captured = "";
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      return true;
+    };
+
+    try {
+      await runAgent(config, "system", hugeTask, tempDir, "guard-log-agent", stubClient);
+    } finally {
+      process.stderr.write = original;
+    }
+
+    const lines = captured.trim().split("\n");
+    const guardEvent = lines
+      .map((l) => JSON.parse(l))
+      .find((e: { event: string }) => e.event === "context_guard_triggered");
+
+    expect(guardEvent).toBeDefined();
+    expect(guardEvent.estimated_tokens).toBeGreaterThan(190_000);
+    expect(guardEvent.model_window).toBe(200_000);
+  });
+
+  it("emits context_estimation_drift when estimate diverges >30% from actual", async () => {
+    // The chars/3 heuristic will likely diverge from the actual token count
+    // reported by the API. We can control this by setting a low actual count
+    // that's far from what the estimator computes.
+    const config = makeConfig({ log_events: true });
+
+    // With a small system prompt and task, the estimated tokens will be low.
+    // If the API reports a much higher actual, the ratio will diverge.
+    // We'll set input_tokens very high relative to a small payload.
+    const stubClient: MessageClient = {
+      create: async () =>
+        makeMessage({
+          stop_reason: "end_turn",
+          content: [makeTextBlock("Done.")],
+          // The estimated tokens for "system" + tools + "task" is small (~few hundred).
+          // Setting actual input_tokens to 10000 will make ratio < 0.7 (estimated/actual < 0.7).
+          usage: { input_tokens: 10000, output_tokens: 50 },
+        }),
+    };
+
+    let captured = "";
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      return true;
+    };
+
+    try {
+      await runAgent(config, "system", "task", tempDir, "drift-agent", stubClient);
+    } finally {
+      process.stderr.write = original;
+    }
+
+    const lines = captured.trim().split("\n");
+    const driftEvent = lines
+      .map((l) => JSON.parse(l))
+      .find((e: { event: string }) => e.event === "context_estimation_drift");
+
+    expect(driftEvent).toBeDefined();
+    expect(driftEvent.estimated).toBeGreaterThan(0);
+    expect(driftEvent.actual).toBe(10000);
+    expect(driftEvent.ratio).toBeLessThan(0.7);
+  });
+
+  it("does not emit drift when estimate is within 30% of actual", async () => {
+    // Use a large task to dominate the estimate, making the tool definitions
+    // overhead negligible. Then set actual input_tokens to a value within 30%
+    // of the expected estimate.
+    // With a 30k char task, estimate is ~10k tokens (30000/3 = 10000).
+    // System + tools overhead adds ~700 tokens. Total ~10700.
+    // Setting actual input_tokens to 10700 gives ratio ~1.0 (within bounds).
+    const largeTask = "a".repeat(30_000);
+    const config = makeConfig({ log_events: true });
+
+    const stubClient: MessageClient = {
+      create: async () =>
+        makeMessage({
+          stop_reason: "end_turn",
+          content: [makeTextBlock("Done.")],
+          usage: { input_tokens: 10700, output_tokens: 50 },
+        }),
+    };
+
+    let captured = "";
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      return true;
+    };
+
+    try {
+      await runAgent(config, "system", largeTask, tempDir, "no-drift-agent", stubClient);
+    } finally {
+      process.stderr.write = original;
+    }
+
+    const lines = captured
+      .trim()
+      .split("\n")
+      .filter((l) => l.length > 0);
+    const driftEvent = lines
+      .map((l) => JSON.parse(l))
+      .find((e: { event: string }) => e.event === "context_estimation_drift");
+
+    expect(driftEvent).toBeUndefined();
+  });
+});
+
 describe("context-length error in runAgent", () => {
   it("writes failed signal with 'Context window overflow' for context-length BadRequestError", async () => {
     const config = makeConfig();

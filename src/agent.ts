@@ -486,8 +486,26 @@ export async function runAgent(
   const stubMetadata: Map<string, StubMetadata> = new Map();
   const modelWindow = getModelContextWindow(model, logger);
 
+  // Pre-compute fixed cost tokens (system + tools) once before the loop
+  const fixedCostTokens = estimatePayloadTokens(systemBlocks, tools, []);
+
   // Tool loop — model calls tools until it stops
   while (true) {
+    // Pre-call context guard: estimate context and fail gracefully at 95% of model window
+    const estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
+    const contextLimit = 0.95 * modelWindow;
+    if (estimatedContextTokens > contextLimit) {
+      logger.contextGuardTriggered(estimatedContextTokens, modelWindow);
+      await writeFailed(
+        signalPaths,
+        agentName,
+        "error",
+        `Estimated context size (${estimatedContextTokens} tokens) exceeds 95% of model window (${modelWindow} tokens)`,
+      );
+      logger.signalWrite("failed", signalPaths.failed);
+      return { exitCode: 1 };
+    }
+
     let response: Anthropic.Message;
     const callStart = Date.now();
     try {
@@ -520,6 +538,16 @@ export async function runAgent(
     totalInputTokens += response.usage.input_tokens;
     totalOutputTokens += response.usage.output_tokens;
     logger.apiCall(model, response.usage.input_tokens, response.usage.output_tokens, callLatency);
+
+    // Post-call estimation drift detection: compare estimate against actual input tokens.
+    // If the ratio diverges beyond 30%, emit a warning for operator visibility.
+    const actualInputTokens = response.usage.input_tokens;
+    if (actualInputTokens > 0) {
+      const ratio = estimatedContextTokens / actualInputTokens;
+      if (ratio > 1.3 || ratio < 0.7) {
+        logger.contextEstimationDrift(estimatedContextTokens, actualInputTokens, ratio);
+      }
+    }
 
     // Treat max_tokens truncation as a hard error (checked before budget)
     if (response.stop_reason === "max_tokens") {
