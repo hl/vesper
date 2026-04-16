@@ -274,10 +274,22 @@ describe("buildStubMetadata", () => {
   });
 
   it("builds metadata for list_files", () => {
-    const result = JSON.stringify({ entries: ["a.txt", "b.txt"] });
+    const result = JSON.stringify({ entries: ["a.txt", "b.txt", "c.txt"] });
     const meta = buildStubMetadata("list_files", { path: "src" }, result);
     expect(meta.toolName).toBe("list_files");
     expect(meta.target).toBe("src");
+    expect(meta.outcome).toBe("3 entries");
+    expect(meta.size).toBeUndefined();
+  });
+
+  it("builds metadata for list_files with truncated results", () => {
+    const result = JSON.stringify({
+      entries: ["a.txt", "b.txt"],
+      truncated: true,
+      total_entries: 500,
+    });
+    const meta = buildStubMetadata("list_files", { path: "src" }, result);
+    expect(meta.outcome).toBe("2+ entries");
   });
 });
 

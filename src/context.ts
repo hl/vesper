@@ -140,10 +140,8 @@ export function buildStubMetadata(
   const result = parsed ?? safeParseResult(resultString);
 
   switch (toolName) {
-    case "read_file":
-    case "list_files": {
+    case "read_file": {
       const path = typeof input.path === "string" ? input.path : "unknown";
-      // Count newlines in the actual file content, not the JSON envelope
       const content = typeof result.content === "string" ? result.content : resultString;
       const lineCount = countNewlines(content);
       const byteSize = Buffer.byteLength(content, "utf-8");
@@ -152,6 +150,17 @@ export function buildStubMetadata(
         target: path,
         outcome: `${lineCount} lines`,
         size: formatSize(byteSize),
+      };
+    }
+    case "list_files": {
+      const path = typeof input.path === "string" ? input.path : "unknown";
+      const entries = Array.isArray(result.entries) ? result.entries : [];
+      const entryCount = entries.length;
+      const truncated = result.truncated === true;
+      return {
+        toolName,
+        target: path,
+        outcome: truncated ? `${entryCount}+ entries` : `${entryCount} entries`,
       };
     }
     case "write_file":
