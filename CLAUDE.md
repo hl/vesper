@@ -42,6 +42,7 @@ Core flow through source:
 - `config.ts` — YAML agent config loading and validation. Resolution: `.vesper/agents/` in cwd first, then `~/.config/vesper/`.
 - `permissions.ts` — Path: `minimatch` globs against symlink-resolved path relative to cwd. Command: binary name, optionally with first argument.
 - `tools.ts` — Six tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command`. Results truncated to `max_tool_result_size`.
+- `context.ts` — Token estimation (chars/3 heuristic), tool result pruning with outcome-preserving stubs, conversation compaction via summarization API call.
 - `signals.ts` — Writes `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`. Paths configurable via `signals:` in agent YAML.
 - `logger.ts` — JSONL event stream to stderr when `log_events` is enabled.
 
@@ -62,6 +63,7 @@ Core flow through source:
 - **Structural safety**: Permission enforcement is structural, not instructional — tools are filtered from the API call entirely if the agent has no permissions for that category
 - **Symlink resolution**: All path checks resolve symlinks to prevent escapes
 - **Prompt caching**: `cache_control: { type: "ephemeral" }` on system prompt block and last tool definition
+- **Context management**: Three-layer system — pre-call estimation guard, tool result pruning (stubs preserve outcome metadata), and conversation compaction (summarization API call). Configured via `context_management:` in agent YAML.
 
 ## Gotchas
 
@@ -71,6 +73,9 @@ Core flow through source:
 4. `max_tokens` truncation (stop_reason `"max_tokens"`) is a hard error, not a retry
 5. Token budget exhaustion writes `needs_approval`, not `failed`
 6. `writeComplete` and `writeFailed` accept a `SignalPaths` object
+7. Token estimation uses chars/3 — a heuristic, not exact. The context guard fires at a configurable threshold (default 80%) to trigger pruning/compaction before hitting the model's hard limit
+8. Compaction truncation (`stop_reason: "max_tokens"`) is treated as a hard error, not a partial success
+9. Command permission entries must have at most 2 tokens (binary + optional subcommand) — config validation rejects longer entries
 
 ## Navigation
 

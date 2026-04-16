@@ -67,6 +67,8 @@ Global agents at `~/.config/vesper/` follow the same layout. Local agents take p
 
 **Scratchpad** — A file the agent reads at the start of each iteration and writes to during execution. Persists state across iterations without conversation carry-forward.
 
+**Context Management** — Three-layer system to stay within the model's context window. A pre-call guard estimates token usage and triggers pruning (replaces old tool results with compact stubs) and compaction (summarizes the conversation via an extra API call). Configured via `context_management:` in the agent YAML.
+
 **Completion** — Watch file mode: empty/missing = complete, stable line count = no progress. No watch file: runs to token budget.
 
 **Signals** — `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`. Configurable names. The binary refuses to start if stale signals exist.
