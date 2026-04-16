@@ -142,6 +142,9 @@ export function buildStubMetadata(
   switch (toolName) {
     case "read_file": {
       const path = typeof input.path === "string" ? input.path : "unknown";
+      if (result.error) {
+        return { toolName, target: path, outcome: parseOutcome(result) };
+      }
       const content = typeof result.content === "string" ? result.content : resultString;
       const lineCount = countNewlines(content);
       const byteSize = Buffer.byteLength(content, "utf-8");
@@ -154,6 +157,9 @@ export function buildStubMetadata(
     }
     case "list_files": {
       const path = typeof input.path === "string" ? input.path : "unknown";
+      if (result.error) {
+        return { toolName, target: path, outcome: parseOutcome(result) };
+      }
       const entries = Array.isArray(result.entries) ? result.entries : [];
       const entryCount = entries.length;
       const truncated = result.truncated === true;
@@ -185,6 +191,9 @@ export function buildStubMetadata(
       const command = typeof input.command === "string" ? input.command : "unknown";
       const args = Array.isArray(input.args) ? (input.args as string[]).join(" ") : "";
       const target = args ? `${command} ${args}` : command;
+      if (result.error) {
+        return { toolName, target, outcome: parseOutcome(result) };
+      }
       const exitCode = typeof result.exit_code === "number" ? result.exit_code : 0;
       const stdoutSize =
         typeof result.stdout === "string" ? Buffer.byteLength(result.stdout, "utf-8") : 0;

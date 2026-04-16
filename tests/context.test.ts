@@ -291,6 +291,32 @@ describe("buildStubMetadata", () => {
     const meta = buildStubMetadata("list_files", { path: "src" }, result);
     expect(meta.outcome).toBe("2+ entries");
   });
+
+  it("reports error for read_file when file not found", () => {
+    const result = JSON.stringify({ error: "not_found" });
+    const meta = buildStubMetadata("read_file", { path: "missing.ts" }, result);
+    expect(meta.toolName).toBe("read_file");
+    expect(meta.target).toBe("missing.ts");
+    expect(meta.outcome).toBe("error: not_found");
+    expect(meta.size).toBeUndefined();
+  });
+
+  it("reports error for list_files when directory not found", () => {
+    const result = JSON.stringify({ error: "not_found" });
+    const meta = buildStubMetadata("list_files", { path: "no-such-dir" }, result);
+    expect(meta.toolName).toBe("list_files");
+    expect(meta.target).toBe("no-such-dir");
+    expect(meta.outcome).toBe("error: not_found");
+  });
+
+  it("reports error for run_command when denied", () => {
+    const result = JSON.stringify({ error: "permission_denied" });
+    const meta = buildStubMetadata("run_command", { command: "rm", args: ["-rf"] }, result);
+    expect(meta.toolName).toBe("run_command");
+    expect(meta.target).toBe("rm -rf");
+    expect(meta.outcome).toBe("error: permission_denied");
+    expect(meta.size).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
