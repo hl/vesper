@@ -11,7 +11,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { executeTool, extractLastText, type MessageClient, runAgent } from "../src/agent.js";
+import { BadRequestError } from "@anthropic-ai/sdk";
+import {
+  executeTool,
+  extractLastText,
+  isContextLengthError,
+  type MessageClient,
+  runAgent,
+} from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
 
 // ---------------------------------------------------------------------------
@@ -37,6 +44,13 @@ function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
       complete: ".vesper-complete",
       needs_approval: ".vesper-needs-approval",
       failed: ".vesper-failed",
+    },
+    context_management: overrides?.context_management ?? {
+      pruning: "off",
+      pruning_threshold: 0.7,
+      compaction_enabled: false,
+      compaction_threshold: 0.8,
+      compaction_model: null,
     },
     tools: {
       read: ["**"],
@@ -1461,5 +1475,196 @@ describe("signal tool", () => {
 
     expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
     expect(readFileSync(join(tempDir, ".vesper-complete"), "utf-8")).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Context-length error detection (R13)
+// ---------------------------------------------------------------------------
+
+describe("isContextLengthError", () => {
+  it("returns true for BadRequestError with context overflow message", () => {
+    const err = new BadRequestError(
+      400,
+      { type: "error", error: { type: "invalid_request_error", message: "prompt is too long" } },
+      "prompt is too long",
+      new Headers(),
+      "invalid_request_error",
+    );
+    expect(isContextLengthError(err)).toBe(true);
+  });
+
+  it("returns false for BadRequestError with unrelated message", () => {
+    const err = new BadRequestError(
+      400,
+      { type: "error", error: { type: "invalid_request_error", message: "invalid model" } },
+      "invalid model",
+      new Headers(),
+      "invalid_request_error",
+    );
+    expect(isContextLengthError(err)).toBe(false);
+  });
+
+  it("returns false for generic Error", () => {
+    expect(isContextLengthError(new Error("Connection refused"))).toBe(false);
+  });
+
+  it("returns false for BadRequestError with non-invalid_request_error type", () => {
+    const err = new BadRequestError(
+      400,
+      { type: "error", error: { type: "api_error", message: "prompt is too long" } },
+      "prompt is too long",
+      new Headers(),
+      "api_error",
+    );
+    expect(isContextLengthError(err)).toBe(false);
+  });
+
+  it("matches 'maximum context length' pattern", () => {
+    const err = new BadRequestError(
+      400,
+      {
+        type: "error",
+        error: { type: "invalid_request_error", message: "maximum context length exceeded" },
+      },
+      "maximum context length exceeded",
+      new Headers(),
+      "invalid_request_error",
+    );
+    expect(isContextLengthError(err)).toBe(true);
+  });
+
+  it("matches 'too many tokens' pattern", () => {
+    const err = new BadRequestError(
+      400,
+      {
+        type: "error",
+        error: { type: "invalid_request_error", message: "Request has too many tokens" },
+      },
+      "Request has too many tokens",
+      new Headers(),
+      "invalid_request_error",
+    );
+    expect(isContextLengthError(err)).toBe(true);
+  });
+});
+
+describe("context-length error in runAgent", () => {
+  it("writes failed signal with 'Context window overflow' for context-length BadRequestError", async () => {
+    const config = makeConfig();
+
+    const stubClient: MessageClient = {
+      create: async () => {
+        throw new BadRequestError(
+          400,
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message: "prompt is too long: 250000 tokens > 200000 maximum",
+            },
+          },
+          "prompt is too long: 250000 tokens > 200000 maximum",
+          new Headers(),
+          "invalid_request_error",
+        );
+      },
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "overflow-agent", stubClient);
+
+    expect(result.exitCode).toBe(1);
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("error");
+    expect(payload.agent).toBe("overflow-agent");
+    expect(payload.message).toContain("Context window overflow");
+    expect(payload.message).toContain("prompt is too long");
+  });
+
+  it("writes generic 'API error' for non-context BadRequestError", async () => {
+    const config = makeConfig();
+
+    const stubClient: MessageClient = {
+      create: async () => {
+        throw new BadRequestError(
+          400,
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message: "invalid model: nonexistent-model",
+            },
+          },
+          "invalid model: nonexistent-model",
+          new Headers(),
+          "invalid_request_error",
+        );
+      },
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "bad-model-agent", stubClient);
+
+    expect(result.exitCode).toBe(1);
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("error");
+    expect(payload.message).toContain("API error");
+    expect(payload.message).not.toContain("Context window overflow");
+  });
+
+  it("writes generic 'API error' for plain Error (unchanged behavior)", async () => {
+    const config = makeConfig();
+
+    const stubClient: MessageClient = {
+      create: async () => {
+        throw new Error("Connection refused");
+      },
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "err-agent", stubClient);
+
+    expect(result.exitCode).toBe(1);
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("error");
+    expect(payload.message).toContain("API error");
+    expect(payload.message).toContain("Connection refused");
+    expect(payload.message).not.toContain("Context window overflow");
+  });
+
+  it("signal file JSON includes the specific error message for context overflow", async () => {
+    const config = makeConfig();
+    const specificMessage = "Your prompt has exceeded the maximum context length of 200000 tokens";
+
+    const stubClient: MessageClient = {
+      create: async () => {
+        throw new BadRequestError(
+          400,
+          {
+            type: "error",
+            error: { type: "invalid_request_error", message: specificMessage },
+          },
+          specificMessage,
+          new Headers(),
+          "invalid_request_error",
+        );
+      },
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "detail-agent", stubClient);
+
+    expect(result.exitCode).toBe(1);
+    const payload = JSON.parse(readFileSync(join(tempDir, ".vesper-failed"), "utf-8"));
+    // The message format is "Context window overflow: <SDK message>"
+    // The SDK prefixes the status code, so the full message will contain "400 <message>"
+    expect(payload.message).toStartWith("Context window overflow:");
+    expect(payload.message).toContain("maximum context length");
   });
 });

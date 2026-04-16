@@ -10,6 +10,14 @@ export interface SignalConfig {
   failed: string;
 }
 
+export interface ContextManagementConfig {
+  pruning: "always" | "threshold" | "off";
+  pruning_threshold: number;
+  compaction_enabled: boolean;
+  compaction_threshold: number;
+  compaction_model: string | null;
+}
+
 export interface AgentConfig {
   system_prompt: string;
   token_budget: number;
@@ -25,6 +33,7 @@ export interface AgentConfig {
   context_files: string[];
   default_signal: "complete" | "none";
   signals: SignalConfig;
+  context_management: ContextManagementConfig;
   tools: {
     read: string[];
     write: string[];
@@ -206,6 +215,84 @@ export function loadConfig(configPath: string): AgentConfig {
     throw new VesperError(`"signals" must be a mapping in ${configPath}`, 1);
   }
 
+  // Context management
+  const contextManagementRaw = parsed.context_management;
+  let contextManagement: ContextManagementConfig;
+  const VALID_PRUNING_STRATEGIES = ["always", "threshold", "off"] as const;
+
+  if (contextManagementRaw === undefined || contextManagementRaw === null) {
+    contextManagement = {
+      pruning: "off",
+      pruning_threshold: 0.7,
+      compaction_enabled: false,
+      compaction_threshold: 0.8,
+      compaction_model: null,
+    };
+  } else if (isPlainObject(contextManagementRaw)) {
+    const pruning = contextManagementRaw.pruning ?? "off";
+    if (
+      typeof pruning !== "string" ||
+      !(VALID_PRUNING_STRATEGIES as readonly string[]).includes(pruning)
+    ) {
+      throw new VesperError(
+        `"context_management.pruning" must be one of "always", "threshold", or "off" in ${configPath}`,
+        1,
+      );
+    }
+
+    const pruningThreshold = contextManagementRaw.pruning_threshold ?? 0.7;
+    if (
+      typeof pruningThreshold !== "number" ||
+      !Number.isFinite(pruningThreshold) ||
+      pruningThreshold <= 0 ||
+      pruningThreshold > 1
+    ) {
+      throw new VesperError(
+        `"context_management.pruning_threshold" must be a number greater than 0 and at most 1 in ${configPath}`,
+        1,
+      );
+    }
+
+    const compactionEnabled = contextManagementRaw.compaction_enabled ?? false;
+    if (typeof compactionEnabled !== "boolean") {
+      throw new VesperError(
+        `"context_management.compaction_enabled" must be a boolean in ${configPath}`,
+        1,
+      );
+    }
+
+    const compactionThreshold = contextManagementRaw.compaction_threshold ?? 0.8;
+    if (
+      typeof compactionThreshold !== "number" ||
+      !Number.isFinite(compactionThreshold) ||
+      compactionThreshold <= 0 ||
+      compactionThreshold > 1
+    ) {
+      throw new VesperError(
+        `"context_management.compaction_threshold" must be a number greater than 0 and at most 1 in ${configPath}`,
+        1,
+      );
+    }
+
+    const compactionModel = contextManagementRaw.compaction_model ?? null;
+    if (compactionModel !== null && typeof compactionModel !== "string") {
+      throw new VesperError(
+        `"context_management.compaction_model" must be a string or null in ${configPath}`,
+        1,
+      );
+    }
+
+    contextManagement = {
+      pruning: pruning as ContextManagementConfig["pruning"],
+      pruning_threshold: pruningThreshold,
+      compaction_enabled: compactionEnabled,
+      compaction_threshold: compactionThreshold,
+      compaction_model: compactionModel,
+    };
+  } else {
+    throw new VesperError(`"context_management" must be a mapping in ${configPath}`, 1);
+  }
+
   return {
     system_prompt: parsed.system_prompt,
     token_budget: parsed.token_budget,
@@ -223,6 +310,7 @@ export function loadConfig(configPath: string): AgentConfig {
     skills,
     context_files: contextFiles,
     signals,
+    context_management: contextManagement,
     tools: {
       read: toolRead,
       write: toolWrite,

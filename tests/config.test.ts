@@ -689,4 +689,243 @@ tools: {}
       expect((e as VesperError).message).toContain("default_signal");
     }
   });
+
+  // --- context_management ---
+
+  it("defaults context_management to off/disabled when key is absent", () => {
+    const path = writeYaml("no-cm.yml", minimalYaml);
+    const config = loadConfig(path);
+
+    expect(config.context_management.pruning).toBe("off");
+    expect(config.context_management.pruning_threshold).toBe(0.7);
+    expect(config.context_management.compaction_enabled).toBe(false);
+    expect(config.context_management.compaction_threshold).toBe(0.8);
+    expect(config.context_management.compaction_model).toBeNull();
+  });
+
+  it("treats context_management: null as all-defaults", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management: null
+tools: {}
+`;
+    const path = writeYaml("cm-null.yml", yaml);
+    const config = loadConfig(path);
+
+    expect(config.context_management.pruning).toBe("off");
+    expect(config.context_management.compaction_enabled).toBe(false);
+  });
+
+  it("parses context_management with only pruning set, other fields default", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  pruning: always
+tools: {}
+`;
+    const path = writeYaml("cm-pruning-only.yml", yaml);
+    const config = loadConfig(path);
+
+    expect(config.context_management.pruning).toBe("always");
+    expect(config.context_management.pruning_threshold).toBe(0.7);
+    expect(config.context_management.compaction_enabled).toBe(false);
+    expect(config.context_management.compaction_threshold).toBe(0.8);
+    expect(config.context_management.compaction_model).toBeNull();
+  });
+
+  it("parses full context_management config with all fields set", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  pruning: threshold
+  pruning_threshold: 0.6
+  compaction_enabled: true
+  compaction_threshold: 0.9
+  compaction_model: claude-haiku-3
+tools: {}
+`;
+    const path = writeYaml("cm-full.yml", yaml);
+    const config = loadConfig(path);
+
+    expect(config.context_management.pruning).toBe("threshold");
+    expect(config.context_management.pruning_threshold).toBe(0.6);
+    expect(config.context_management.compaction_enabled).toBe(true);
+    expect(config.context_management.compaction_threshold).toBe(0.9);
+    expect(config.context_management.compaction_model).toBe("claude-haiku-3");
+  });
+
+  it("exits with code 1 when context_management.pruning is invalid", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  pruning: invalid
+tools: {}
+`;
+    const path = writeYaml("cm-bad-pruning.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("context_management.pruning");
+    }
+  });
+
+  it("exits with code 1 when context_management.pruning_threshold is 0", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  pruning_threshold: 0
+tools: {}
+`;
+    const path = writeYaml("cm-threshold-zero.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("context_management.pruning_threshold");
+    }
+  });
+
+  it("exits with code 1 when context_management.pruning_threshold exceeds 1", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  pruning_threshold: 1.5
+tools: {}
+`;
+    const path = writeYaml("cm-threshold-over.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("context_management.pruning_threshold");
+    }
+  });
+
+  it("exits with code 1 when context_management.compaction_threshold is 0", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  compaction_threshold: 0
+tools: {}
+`;
+    const path = writeYaml("cm-compact-threshold-zero.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("context_management.compaction_threshold");
+    }
+  });
+
+  it("exits with code 1 when context_management.compaction_threshold exceeds 1", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  compaction_threshold: 1.5
+tools: {}
+`;
+    const path = writeYaml("cm-compact-threshold-over.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("context_management.compaction_threshold");
+    }
+  });
+
+  it("exits with code 1 when context_management.compaction_model is a number", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  compaction_model: 123
+tools: {}
+`;
+    const path = writeYaml("cm-bad-model.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("context_management.compaction_model");
+    }
+  });
+
+  it("exits with code 1 when context_management is not a mapping", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management: "invalid"
+tools: {}
+`;
+    const path = writeYaml("cm-not-mapping.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("context_management");
+    }
+  });
+
+  it("accepts context_management.pruning_threshold at exactly 1", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  pruning_threshold: 1
+tools: {}
+`;
+    const path = writeYaml("cm-threshold-one.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.context_management.pruning_threshold).toBe(1);
+  });
+
+  it("accepts context_management.compaction_threshold at exactly 1", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+context_management:
+  compaction_threshold: 1
+tools: {}
+`;
+    const path = writeYaml("cm-compact-threshold-one.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.context_management.compaction_threshold).toBe(1);
+  });
 });
