@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import type { MessageClient } from "./agent.js";
 import type { ContextManagementConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 
@@ -212,6 +213,86 @@ export function buildStubMetadata(
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   return `${Math.round(bytes / 1024)}KB`;
+}
+
+// ---------------------------------------------------------------------------
+// Compaction
+// ---------------------------------------------------------------------------
+
+const COMPACTION_SYSTEM_PROMPT = `You are a conversation summarizer for an agentic coding assistant. Your job is to produce a structured summary of the conversation so far, optimized for agentic continuity — the agent will use this summary to continue working effectively.
+
+Produce a summary with these sections:
+
+## Accomplished
+- What tasks or sub-tasks have been completed
+- Key decisions made and their rationale
+
+## Files Modified
+- List each file that was created, modified, or deleted, with a brief note on what changed
+
+## Commands Run
+- List commands executed and their outcomes (success/failure, key output)
+
+## Current State
+- What is the working state right now (e.g., tests passing, build broken, partially implemented)
+- Any errors or issues that were encountered but not yet resolved
+
+## Remaining Work
+- What tasks or sub-tasks still need to be done
+- Any blockers or open questions
+
+Be concise but preserve all information the agent needs to continue the work. Do not include pleasantries or meta-commentary.`;
+
+const COMPACTION_MAX_TOKENS = 8192;
+
+/**
+ * Compact a conversation by summarizing it via an extra API call.
+ * Returns the summary text and usage for budget tracking.
+ *
+ * Throws if the API call fails or if the response is truncated (stop_reason === "max_tokens"),
+ * per R9 — callers should catch and write a failed signal.
+ */
+export async function compactConversation(
+  client: MessageClient,
+  model: string,
+  messages: Anthropic.MessageParam[],
+  userContent: string,
+  maxTokens?: number,
+): Promise<{ summary: string; usage: Anthropic.Usage }> {
+  const compactionMessages: Anthropic.MessageParam[] = [
+    {
+      role: "user",
+      content: `Please summarize the following conversation for agentic continuity.\n\nOriginal task:\n${userContent}\n\nConversation:\n${JSON.stringify(messages)}`,
+    },
+  ];
+
+  const response = await client.create({
+    model,
+    max_tokens: maxTokens ?? COMPACTION_MAX_TOKENS,
+    system: [{ type: "text", text: COMPACTION_SYSTEM_PROMPT }],
+    messages: compactionMessages,
+  });
+
+  // R9: Treat max_tokens truncation as a compaction failure
+  if (response.stop_reason === "max_tokens") {
+    throw new Error(
+      "Compaction response was truncated (stop_reason: max_tokens). Summary may be incomplete.",
+    );
+  }
+
+  // Extract text from the response
+  let summary = "";
+  for (const block of response.content) {
+    if (block.type === "text") {
+      summary += block.text;
+    }
+  }
+
+  if (summary.trim().length === 0) {
+    throw new Error("Compaction produced an empty summary.");
+  }
+
+  return { summary: summary.trim(), usage: response.usage };
 }
 
 /**

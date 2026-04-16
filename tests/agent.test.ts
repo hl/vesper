@@ -2253,3 +2253,763 @@ describe("context-length error in runAgent", () => {
     expect(payload.message).toContain("maximum context length");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Conversation compaction (Unit 6)
+// ---------------------------------------------------------------------------
+
+describe("conversation compaction", () => {
+  // Helper to create a compaction-enabled config.
+  // Uses a low threshold (0.05) so even small conversations trigger compaction
+  // after a single tool result is added, avoiding the need for huge test files.
+  function compactionConfig(overrides?: Partial<AgentConfig>): AgentConfig {
+    return makeConfig({
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.05,
+        compaction_model: null,
+      },
+      ...overrides,
+    });
+  }
+
+  it("does not fire compaction when compaction is disabled (default)", async () => {
+    // Default config has compaction_enabled: false
+    const config = makeConfig();
+
+    // Use a large task to exceed what would be the compaction threshold if enabled
+    // But since compaction is disabled, it should just hit the 95% guard.
+    // Actually, keep the task small so we just test normal operation.
+    let apiCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        apiCallCount++;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "no-compact-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(0);
+    // Only one API call — no compaction call
+    expect(apiCallCount).toBe(1);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+  });
+
+  it("does not fire compaction when context is below threshold", async () => {
+    // Use a high threshold (0.99) so nothing triggers compaction
+    const config = makeConfig({
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.99,
+        compaction_model: null,
+      },
+    });
+
+    let apiCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async () => {
+        apiCallCount++;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    // Small task, well below 99% of 200k
+    const result = await runAgent(
+      config,
+      "system",
+      "small task",
+      tempDir,
+      "below-threshold-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(0);
+    // Only one main API call, no compaction
+    expect(apiCallCount).toBe(1);
+  });
+
+  it("fires compaction when context exceeds threshold and replaces messages", async () => {
+    // Threshold 0.05 => compaction fires at > 10k tokens (~30k chars).
+    // A tool result reading a ~50KB file will push context well over 10k tokens.
+    const config = compactionConfig();
+
+    let apiCallCount = 0;
+    let mainCallCount = 0;
+    let mainCallMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        apiCallCount++;
+        // Compaction call has no tools parameter
+        if (!params.tools) {
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [
+              makeTextBlock("## Accomplished\n- Started work\n\n## Remaining Work\n- Finish"),
+            ],
+            usage: { input_tokens: 1000, output_tokens: 200 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          // First main call: model reads a file
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        // After compaction, capture messages
+        mainCallMessages = params.messages;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        });
+      },
+    };
+
+    // Create a file large enough to push context over 0.05 * 200k = 10k tokens
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    const result = await runAgent(
+      config,
+      "system",
+      "Build the feature",
+      tempDir,
+      "compact-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(0);
+    // 1 main call (tool_use) + 1 compaction call + 1 main call (end_turn) = 3
+    expect(apiCallCount).toBe(3);
+
+    // Verify the main call's messages have the compacted format
+    expect(mainCallMessages).toBeDefined();
+    expect(mainCallMessages?.length).toBe(1);
+    expect(mainCallMessages?.[0].role).toBe("user");
+    const content = mainCallMessages?.[0].content as string;
+    expect(content).toContain("[Original Task]");
+    expect(content).toContain("[Conversation Summary]");
+    expect(content).toContain("## Accomplished");
+  });
+
+  it("uses configured compaction_model for the compaction API call", async () => {
+    const config = makeConfig({
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.05,
+        compaction_model: "claude-haiku-3",
+      },
+    });
+
+    let compactionModel: string | undefined;
+    let mainModel: string | undefined;
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          compactionModel = params.model;
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock("Summary of work done.")],
+            usage: { input_tokens: 500, output_tokens: 100 },
+          });
+        }
+        mainCallCount++;
+        mainModel = params.model;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    await runAgent(config, "system", "build feature", tempDir, "model-compact-agent", stubClient);
+
+    expect(compactionModel).toBe("claude-haiku-3");
+    // Main call should still use the agent's default model
+    expect(mainModel).toBe("claude-sonnet-4-6");
+  });
+
+  it("counts compaction usage against token budget (R8)", async () => {
+    // Set a tight budget. First main call uses 80, then compaction uses 600,
+    // exceeding the budget of 500.
+    const config = makeConfig({
+      token_budget: 500,
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.05,
+        compaction_model: null,
+      },
+    });
+
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          // Compaction call uses 400 + 200 = 600 tokens
+          // Total: 80 (main) + 600 (compaction) = 680 > 500
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock("Summary.")],
+            usage: { input_tokens: 400, output_tokens: 200 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "budget-compact-agent",
+      stubClient,
+    );
+
+    // Budget exceeded by compaction -> needs_approval
+    expect(result.exitCode).toBe(0);
+    const signalPath = join(tempDir, ".vesper-needs-approval");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("token_budget_exceeded");
+  });
+
+  it("writes failed signal when compaction API call throws (R9)", async () => {
+    const config = compactionConfig();
+
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          throw new Error("Compaction model unavailable");
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "compact-fail-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(1);
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("error");
+    expect(payload.message).toContain("Conversation compaction failed");
+    expect(payload.message).toContain("Compaction model unavailable");
+  });
+
+  it("writes failed signal when compaction returns max_tokens (R9)", async () => {
+    const config = compactionConfig();
+
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          return makeMessage({
+            stop_reason: "max_tokens",
+            content: [makeTextBlock("Partial summary...")],
+            usage: { input_tokens: 500, output_tokens: 8192 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "compact-trunc-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(1);
+    const signalPath = join(tempDir, ".vesper-failed");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("error");
+    expect(payload.message).toContain("Conversation compaction failed");
+    expect(payload.message).toContain("truncated");
+  });
+
+  it("writes scratchpad + needs_approval when still over threshold after compaction (R14)", async () => {
+    // Threshold 0.05 => 10k tokens => ~30k chars. Return a huge summary
+    // that keeps the compacted message above this threshold.
+    const config = makeConfig({
+      scratchpad: "scratch.md",
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.05,
+        compaction_model: null,
+      },
+    });
+
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          // Return a summary that is huge enough to keep context over 0.05 * 200k = 10k tokens
+          // 10k tokens * 3 chars/token = 30k chars needed
+          const hugeSummary = `Summary: ${"y".repeat(50_000)}`;
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock(hugeSummary)],
+            usage: { input_tokens: 500, output_tokens: 200 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    const result = await runAgent(config, "system", "task", tempDir, "r14-agent", stubClient);
+
+    expect(result.exitCode).toBe(0);
+
+    // needs_approval signal should be written
+    const signalPath = join(tempDir, ".vesper-needs-approval");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("agent_needs_approval");
+    expect(payload.message).toContain("Context still exceeds threshold after compaction");
+
+    // Scratchpad should contain the summary
+    const scratchpadPath = join(tempDir, "scratch.md");
+    expect(existsSync(scratchpadPath)).toBe(true);
+    const scratchpadContent = readFileSync(scratchpadPath, "utf-8");
+    expect(scratchpadContent).toContain("Summary:");
+  });
+
+  it("skips scratchpad write but still writes needs_approval when no scratchpad configured (R14)", async () => {
+    const config = makeConfig({
+      scratchpad: null,
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.05,
+        compaction_model: null,
+      },
+    });
+
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          const hugeSummary = `Summary: ${"y".repeat(50_000)}`;
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock(hugeSummary)],
+            usage: { input_tokens: 500, output_tokens: 200 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "r14-no-scratch-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(0);
+
+    // needs_approval signal should still be written
+    const signalPath = join(tempDir, ".vesper-needs-approval");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("agent_needs_approval");
+    expect(payload.message).toContain("Context still exceeds threshold after compaction");
+  });
+
+  it("compaction fires only once per invocation — compactionAttempted prevents re-triggering", async () => {
+    const config = compactionConfig();
+
+    let compactionCalls = 0;
+    let mainCalls = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          compactionCalls++;
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock("Compacted summary of work.")],
+            usage: { input_tokens: 500, output_tokens: 100 },
+          });
+        }
+        mainCalls++;
+        if (mainCalls === 1) {
+          // First main call: read a file to trigger compaction
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_1")],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          });
+        }
+        if (mainCalls === 2) {
+          // After compaction, read another file. This should NOT trigger a second compaction.
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big2.txt" }, "toolu_2")],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          });
+        }
+        // Third main call: end turn
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+    writeFileSync(join(tempDir, "big2.txt"), "more\n".repeat(10_000));
+
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "once-compact-agent",
+      stubClient,
+    );
+
+    expect(result.exitCode).toBe(0);
+    // Compaction should have fired exactly once
+    expect(compactionCalls).toBe(1);
+    // Main calls: 3 (read big.txt, read big2.txt, end_turn)
+    expect(mainCalls).toBe(3);
+  });
+
+  it("compacted messages array has exactly one user message with delimiters", async () => {
+    const config = compactionConfig();
+
+    let mainCallCount = 0;
+    let postCompactionMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [
+              makeTextBlock("## Accomplished\n- Built feature\n\n## Remaining Work\n- Tests"),
+            ],
+            usage: { input_tokens: 500, output_tokens: 100 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        // After compaction, capture the messages
+        postCompactionMessages = params.messages;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    await runAgent(config, "system", "Build the feature", tempDir, "delimiters-agent", stubClient);
+
+    expect(postCompactionMessages).toBeDefined();
+    expect(postCompactionMessages?.length).toBe(1);
+    const msg = postCompactionMessages?.[0];
+    expect(msg?.role).toBe("user");
+    const content = msg?.content as string;
+    // Check for the specific delimiters
+    expect(content).toContain("[Original Task]");
+    expect(content).toContain("[Conversation Summary]");
+    // The original task content should be present
+    expect(content).toContain("Build the feature");
+    // The summary should be present
+    expect(content).toContain("## Accomplished");
+    expect(content).toContain("Built feature");
+  });
+
+  it("token budget check runs after compaction usage is added", async () => {
+    // Budget of 2000 total. First main call uses 80, compaction uses 500 (total 580),
+    // second main call uses 1500, total = 2080 > 2000 budget.
+    const config = makeConfig({
+      token_budget: 2000,
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.05,
+        compaction_model: null,
+      },
+    });
+
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          // Compaction call: 400 + 100 = 500 tokens
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock("Summary of work.")],
+            usage: { input_tokens: 400, output_tokens: 100 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        // Post-compaction call: uses enough to exceed budget
+        // Prior usage: 80 (main) + 500 (compact) = 580
+        // This call: 1200 + 300 = 1500. Total: 580 + 1500 = 2080 > 2000
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1200, output_tokens: 300 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "budget-after-compact-agent",
+      stubClient,
+    );
+
+    // Budget exceeded after main call -> needs_approval
+    expect(result.exitCode).toBe(0);
+    const signalPath = join(tempDir, ".vesper-needs-approval");
+    expect(existsSync(signalPath)).toBe(true);
+    const payload = JSON.parse(readFileSync(signalPath, "utf-8"));
+    expect(payload.reason).toBe("token_budget_exceeded");
+    // Total input: 50 + 400 + 1200 = 1650, Total output: 30 + 100 + 300 = 430
+    expect(payload.message).toContain("1650");
+    expect(payload.message).toContain("430");
+  });
+
+  it("pre-call guard defers to compaction when enabled and not yet attempted", async () => {
+    // With threshold 0.05, compaction fires at > 10k tokens. Since the 0.05
+    // threshold is well below the 95% guard, compaction fires first and
+    // prevents the guard from failing the agent.
+    const config = compactionConfig();
+
+    let compactionCalled = false;
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          compactionCalled = true;
+          // Return a small summary so context drops below thresholds
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock("Brief summary of work done.")],
+            usage: { input_tokens: 500, output_tokens: 100 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          // Read a file to push context above compaction threshold
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    const result = await runAgent(
+      config,
+      "system",
+      "task",
+      tempDir,
+      "defer-guard-agent",
+      stubClient,
+    );
+
+    // Compaction should have fired, preventing the 95% guard from killing the agent
+    expect(compactionCalled).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(false);
+    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+  });
+
+  it("emits context_compacted logger event with before/after tokens", async () => {
+    const config = makeConfig({
+      log_events: true,
+      context_management: {
+        pruning: "off",
+        pruning_threshold: 0.7,
+        compaction_enabled: true,
+        compaction_threshold: 0.05,
+        compaction_model: null,
+      },
+    });
+
+    let mainCallCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        if (!params.tools) {
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock("Summary.")],
+            usage: { input_tokens: 500, output_tokens: 100 },
+          });
+        }
+        mainCallCount++;
+        if (mainCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("read_file", { path: "big.txt" }, "toolu_big")],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 100, output_tokens: 50 },
+        });
+      },
+    };
+
+    writeFileSync(join(tempDir, "big.txt"), "data\n".repeat(10_000));
+
+    let captured = "";
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk: string | Uint8Array) => {
+      captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      return true;
+    };
+
+    try {
+      await runAgent(config, "system", "task", tempDir, "compact-log-agent", stubClient);
+    } finally {
+      process.stderr.write = original;
+    }
+
+    const lines = captured.trim().split("\n");
+    const compactEvent = lines
+      .map((l) => JSON.parse(l))
+      .find((e: { event: string }) => e.event === "context_compacted");
+
+    expect(compactEvent).toBeDefined();
+    // Before tokens should be > 10k (above 5% of 200k)
+    expect(compactEvent.before_tokens).toBeGreaterThan(10_000);
+    expect(compactEvent.after_tokens).toBeLessThan(compactEvent.before_tokens);
+  });
+});

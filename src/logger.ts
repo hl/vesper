@@ -64,4 +64,11 @@ export class Logger {
       estimated_tokens_saved: estimatedTokensSaved,
     });
   }
+
+  contextCompacted(beforeTokens: number, afterTokens: number): void {
+    this.emit("context_compacted", {
+      before_tokens: beforeTokens,
+      after_tokens: afterTokens,
+    });
+  }
 }

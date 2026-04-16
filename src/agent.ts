@@ -4,6 +4,7 @@ import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
 import type { AgentConfig } from "./config.js";
 import {
   buildStubMetadata,
+  compactConversation,
   estimatePayloadTokens,
   getModelContextWindow,
   pruneMessages,
@@ -489,11 +490,103 @@ export async function runAgent(
   // Pre-compute fixed cost tokens (system + tools) once before the loop
   const fixedCostTokens = estimatePayloadTokens(systemBlocks, tools, []);
 
+  // Compaction fires at most once per invocation (R4, R5)
+  let compactionAttempted = false;
+  const compactionEnabled = config.context_management.compaction_enabled;
+  const compactionThreshold = config.context_management.compaction_threshold;
+  const compactionModel = config.context_management.compaction_model ?? model;
+
   // Tool loop — model calls tools until it stops
   while (true) {
     // Pre-call context guard: estimate context and fail gracefully at 95% of model window
-    const estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
+    let estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
     const contextLimit = 0.95 * modelWindow;
+
+    // Compaction check: fires before the 95% guard and at the compaction threshold
+    const compactionLimit = compactionThreshold * modelWindow;
+    if (compactionEnabled && !compactionAttempted && estimatedContextTokens > compactionLimit) {
+      compactionAttempted = true;
+      const beforeTokens = estimatedContextTokens;
+
+      try {
+        const { summary, usage: compactionUsage } = await compactConversation(
+          messagesClient,
+          compactionModel,
+          messages,
+          userContent,
+        );
+
+        // R8: Count compaction usage against token budget
+        totalInputTokens += compactionUsage.input_tokens;
+        totalOutputTokens += compactionUsage.output_tokens;
+
+        // Check token budget after compaction (may trigger needs_approval)
+        if (totalInputTokens + totalOutputTokens >= config.token_budget) {
+          await writeNeedsApproval(
+            signalPaths,
+            agentName,
+            config.token_budget,
+            totalInputTokens,
+            totalOutputTokens,
+            null,
+          );
+          logger.signalWrite("needs_approval", signalPaths.needsApproval);
+          return { exitCode: 0 };
+        }
+
+        // R5: Replace messages with single user message containing original task + summary
+        messages = [
+          {
+            role: "user",
+            content: `[Original Task]\n${userContent}\n\n[Conversation Summary]\n${summary}`,
+          },
+        ];
+
+        // Re-estimate after compaction
+        estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
+
+        logger.contextCompacted(beforeTokens, estimatedContextTokens);
+
+        // R14: If still over compaction threshold after compaction, write scratchpad + needs_approval
+        if (estimatedContextTokens > compactionLimit) {
+          // Write summary to scratchpad if configured.
+          // Use lexical containment (not isInsideCwd) because the file may not exist yet.
+          // Resolve relative to the real cwd to handle symlinks (e.g. /tmp -> /private/tmp on macOS).
+          if (config.scratchpad !== null) {
+            let realCwd: string;
+            try {
+              realCwd = realpathSync(cwd);
+            } catch {
+              realCwd = cwd;
+            }
+            const scratchpadPath = resolve(realCwd, config.scratchpad);
+            if (isContained(scratchpadPath, realCwd)) {
+              await Bun.write(scratchpadPath, summary);
+            }
+          }
+          await writeAgentNeedsApproval(
+            signalPaths,
+            agentName,
+            `Context still exceeds threshold after compaction (${estimatedContextTokens} tokens > ${Math.round(compactionLimit)} limit)`,
+          );
+          logger.signalWrite("needs_approval", signalPaths.needsApproval);
+          return { exitCode: 0 };
+        }
+      } catch (err) {
+        // R9: Compaction failure writes failed signal
+        const errMsg = err instanceof Error ? err.message : String(err);
+        await writeFailed(
+          signalPaths,
+          agentName,
+          "error",
+          `Conversation compaction failed: ${errMsg}`,
+        );
+        logger.signalWrite("failed", signalPaths.failed);
+        return { exitCode: 1 };
+      }
+    }
+
+    // Pre-call guard: if still over 95%, fail (compaction either not enabled, already attempted, or succeeded but context still high)
     if (estimatedContextTokens > contextLimit) {
       logger.contextGuardTriggered(estimatedContextTokens, modelWindow);
       await writeFailed(

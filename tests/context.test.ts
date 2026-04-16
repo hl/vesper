@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import type Anthropic from "@anthropic-ai/sdk";
+import type { MessageClient } from "../src/agent.js";
 import {
   buildStubMetadata,
+  compactConversation,
   estimatePayloadTokens,
   estimateTokens,
   generateStub,
@@ -653,5 +655,210 @@ describe("pruneMessages", () => {
     expect(result.prunedCount).toBe(1);
     const prunedContent = result.messages[2].content as Anthropic.ToolResultBlockParam[];
     expect(prunedContent[0].content).toBe("[run_command: echo hello — exit 0, 6B stdout]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// compactConversation
+// ---------------------------------------------------------------------------
+
+function makeCompactionUsage(overrides?: Partial<Anthropic.Usage>): Anthropic.Usage {
+  return {
+    input_tokens: 500,
+    output_tokens: 200,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation: null,
+    inference_geo: null,
+    server_tool_use: null,
+    service_tier: null,
+    ...overrides,
+  };
+}
+
+function makeCompactionMessage(overrides?: {
+  stop_reason?: Anthropic.Message["stop_reason"];
+  content?: Anthropic.ContentBlock[];
+  usage?: Partial<Anthropic.Usage>;
+}): Anthropic.Message {
+  return {
+    id: "msg_compaction",
+    type: "message",
+    role: "assistant",
+    model: "test",
+    stop_reason: overrides?.stop_reason ?? "end_turn",
+    stop_sequence: null,
+    stop_details: null,
+    container: null,
+    content: overrides?.content ?? [
+      {
+        type: "text",
+        text: "## Accomplished\n- Did stuff\n\n## Remaining Work\n- More stuff",
+        citations: null,
+      } as Anthropic.TextBlock,
+    ],
+    usage: makeCompactionUsage(overrides?.usage),
+  } as Anthropic.Message;
+}
+
+describe("compactConversation", () => {
+  it("returns summary text and usage from a successful compaction call", async () => {
+    const stubClient: MessageClient = {
+      create: async () => makeCompactionMessage(),
+    };
+
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "Do the task" },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "I will do the task." } as Anthropic.TextBlock],
+      },
+    ];
+
+    const result = await compactConversation(stubClient, "test-model", messages, "Do the task");
+
+    expect(result.summary).toContain("## Accomplished");
+    expect(result.summary).toContain("Did stuff");
+    expect(result.usage.input_tokens).toBe(500);
+    expect(result.usage.output_tokens).toBe(200);
+  });
+
+  it("uses the specified model for the compaction call", async () => {
+    let capturedModel: string | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedModel = params.model;
+        return makeCompactionMessage();
+      },
+    };
+
+    await compactConversation(
+      stubClient,
+      "claude-haiku-3",
+      [{ role: "user", content: "task" }],
+      "task",
+    );
+
+    expect(capturedModel).toBe("claude-haiku-3");
+  });
+
+  it("throws when compaction API call fails", async () => {
+    const stubClient: MessageClient = {
+      create: async () => {
+        throw new Error("API connection failed");
+      },
+    };
+
+    await expect(
+      compactConversation(stubClient, "test-model", [{ role: "user", content: "task" }], "task"),
+    ).rejects.toThrow("API connection failed");
+  });
+
+  it("throws when compaction response is truncated (max_tokens)", async () => {
+    const stubClient: MessageClient = {
+      create: async () =>
+        makeCompactionMessage({
+          stop_reason: "max_tokens",
+          content: [
+            { type: "text", text: "Partial summary...", citations: null } as Anthropic.TextBlock,
+          ],
+        }),
+    };
+
+    await expect(
+      compactConversation(stubClient, "test-model", [{ role: "user", content: "task" }], "task"),
+    ).rejects.toThrow("truncated");
+  });
+
+  it("throws when compaction produces empty summary", async () => {
+    const stubClient: MessageClient = {
+      create: async () =>
+        makeCompactionMessage({
+          content: [{ type: "text", text: "   ", citations: null } as Anthropic.TextBlock],
+        }),
+    };
+
+    await expect(
+      compactConversation(stubClient, "test-model", [{ role: "user", content: "task" }], "task"),
+    ).rejects.toThrow("empty summary");
+  });
+
+  it("sends conversation as JSON in the compaction request", async () => {
+    let capturedMessages: Anthropic.MessageParam[] | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedMessages = params.messages;
+        return makeCompactionMessage();
+      },
+    };
+
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "Build the feature" }];
+
+    await compactConversation(stubClient, "test-model", messages, "Build the feature");
+
+    expect(capturedMessages).toBeDefined();
+    expect(capturedMessages?.length).toBe(1);
+    const content = capturedMessages?.[0].content as string;
+    expect(content).toContain("Build the feature");
+    expect(content).toContain("agentic continuity");
+  });
+
+  it("sends no tools in the compaction request", async () => {
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeCompactionMessage();
+      },
+    };
+
+    await compactConversation(
+      stubClient,
+      "test-model",
+      [{ role: "user", content: "task" }],
+      "task",
+    );
+
+    // No tools property should be set
+    expect(capturedParams?.tools).toBeUndefined();
+  });
+
+  it("uses custom max_tokens when provided", async () => {
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeCompactionMessage();
+      },
+    };
+
+    await compactConversation(
+      stubClient,
+      "test-model",
+      [{ role: "user", content: "task" }],
+      "task",
+      4096,
+    );
+
+    expect(capturedParams?.max_tokens).toBe(4096);
+  });
+
+  it("uses default max_tokens of 8192 when not provided", async () => {
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeCompactionMessage();
+      },
+    };
+
+    await compactConversation(
+      stubClient,
+      "test-model",
+      [{ role: "user", content: "task" }],
+      "task",
+    );
+
+    expect(capturedParams?.max_tokens).toBe(8192);
   });
 });
