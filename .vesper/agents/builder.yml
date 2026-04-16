@@ -12,6 +12,13 @@ signals:
   needs_approval: ".vesper-needs-approval"
   failed: ".vesper-failed"
 
+# context_management:
+#   pruning: "off"                          # "always", "threshold", or "off"
+#   pruning_threshold: 0.7                  # Prune when context exceeds this % of window
+#   compaction_enabled: false               # Summarize conversation to free context
+#   compaction_threshold: 0.8               # Compact when context exceeds this % of window
+#   compaction_model: null                  # Model for compaction (null = use agent model)
+
 tools:
   read:
     - "**"

@@ -13,6 +13,9 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { VesperError } from "./errors.js";
+import EXAMPLE_AGENT_YML from "./templates/example-agent.yml" with { type: "text" };
+import EXAMPLE_SYSTEM_PROMPT from "./templates/example-system-prompt.md" with { type: "text" };
+import CLAUDE_MD from "./templates/vesper-claude.md" with { type: "text" };
 
 export interface InitOptions {
   force: boolean;
@@ -20,79 +23,6 @@ export interface InitOptions {
   cwd: string;
   home?: string;
 }
-
-const EXAMPLE_AGENT_YML = `# Agent configuration — see https://github.com/hl/vesper
-# Copy this file and the matching system prompt to create your own agent.
-
-system_prompt: system_prompts/example.md   # Relative to .vesper/
-token_budget: 100000                       # Max tokens per run
-max_tool_result_size: 50000                # Truncate tool results beyond this (bytes)
-log_denied_calls: false                    # Log when a tool call is denied
-log_events: false                          # Emit JSONL event stream to stderr
-skills: ".vesper/skills"                   # Directory of skill .md files (null to disable)
-scratchpad: ".vesper/.scratchpad.md"       # Persistent scratchpad file (null to disable)
-context_files:                             # Project files appended to system prompt
-  - CLAUDE.md
-
-signals:
-  complete: ".vesper-complete"             # Written on successful completion
-  needs_approval: ".vesper-needs-approval" # Written when token budget exhausted
-  failed: ".vesper-failed"                 # Written on failure
-
-tools:
-  read:                                    # Glob patterns for read_file / list_files
-    - "src/**"
-    - "docs/**"
-  write:                                   # Glob patterns for write_file / patch_file
-    - "src/**"
-  delete:                                  # Glob patterns for delete_file
-    - "src/**"
-  commands:                                # Allowed commands (binary or binary + first arg)
-    - "bun test"
-    - "git commit"
-`;
-
-const EXAMPLE_SYSTEM_PROMPT = `You are a helpful agent. Describe your agent's role and capabilities here.
-
-## Guidelines
-
-- Read before writing. Understand the codebase before making changes.
-- Follow existing patterns and conventions.
-- Write tests for new behavior.
-`;
-
-const CLAUDE_MD = `# .vesper/ — Agent Configuration
-
-This directory contains Vesper agent configurations, system prompts, skills, and memories.
-
-## Directory Layout
-
-| Directory         | Purpose                                      |
-|-------------------|----------------------------------------------|
-| agents/           | Agent config files (.yml)                    |
-| system_prompts/   | System prompt files (.md) referenced by configs |
-| skills/           | Skill files (.md) injected into agent context |
-| memories/         | Project-specific notes and context            |
-
-## Creating an Agent
-
-1. Copy \`agents/example.yml\` to \`agents/<name>.yml\`
-2. Copy \`system_prompts/example.md\` to \`system_prompts/<name>.md\`
-3. Edit the config: set permissions, tools, token budget
-4. Edit the system prompt: describe the agent's role and guidelines
-5. Run: \`vesper run <name>\`
-
-## Scratchpad
-
-Agents can persist state via a scratchpad file (configured in the agent YAML).
-The default location is \`.vesper/.scratchpad.md\`. Each run starts fresh context but
-can read/write the scratchpad to carry forward plans and progress.
-
-## Skills
-
-Skill files in \`skills/\` are Markdown documents injected into the agent's system prompt
-at startup. Use them for persistent knowledge: coding standards, API docs, common patterns.
-`;
 
 const GITIGNORE_ENTRIES = [
   ".vesper-complete",
