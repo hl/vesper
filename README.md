@@ -42,7 +42,7 @@ Each agent is defined by a YAML config in `.vesper/agents/` and a system prompt 
 
 See the example config scaffolded by `vesper init` for all available keys with comments, or the [builder config](.vesper/agents/builder.yml) for a real-world example.
 
-**Required keys:** `system_prompt`, `token_budget`, `tools`, `completion`.
+**Required keys:** `system_prompt`, `token_budget`, `tools`.
 
 ## Directory Structure
 
@@ -59,7 +59,7 @@ Global agents at `~/.config/vesper/` follow the same layout. Local agents take p
 
 ## Concepts
 
-**Tools** — Six tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command`. Each gated by glob patterns in the agent config.
+**Tools** — Six file/command tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command` — each gated by glob patterns in the agent config. Plus a `signal` tool (always available) for explicit exit control.
 
 **Permissions** — Allow-list only. File paths are resolved through symlinks via `realpathSync`. Commands match binary name, optionally with first argument. Agents with no permissions for a tool category never see that tool in the API call.
 
@@ -69,7 +69,7 @@ Global agents at `~/.config/vesper/` follow the same layout. Local agents take p
 
 **Context Management** — Three-layer system to stay within the model's context window. A pre-call guard estimates token usage and triggers pruning (replaces old tool results with compact stubs) and compaction (summarizes the conversation via an extra API call). Configured via `context_management:` in the agent YAML.
 
-**Completion** — Watch file mode: empty/missing = complete, stable line count = no progress. No watch file: runs to token budget.
+**Completion** — Agent exits when it stops calling tools or exhausts its token budget. `default_signal` controls what's written on exit (`complete` or nothing); agents can override by calling the `signal` tool.
 
 **Signals** — `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`. Configurable names. The binary refuses to start if stale signals exist.
 
@@ -94,6 +94,19 @@ vesper init --force   Overwrite existing example files
 vesper --version      Print version
 vesper --help         Show help
 ```
+
+## Documentation
+
+Detailed guides are in [`docs/guide/`](docs/guide/):
+
+- [Configuration Reference](docs/guide/configuration.md) — every YAML key, types, defaults, validation
+- [Permissions](docs/guide/permissions.md) — path globs, command matching, structural safety
+- [Tools](docs/guide/tools.md) — each tool's parameters, returns, and error modes
+- [Context Management](docs/guide/context-management.md) — pruning, compaction, token estimation
+- [Signals](docs/guide/signals.md) — signal files, stale checks, orchestrator integration
+- [Skills and Scratchpad](docs/guide/skills-and-scratchpad.md) — persistent context across runs
+- [CLI Reference](docs/guide/cli.md) — commands, flags, exit codes, stdin usage
+- [Troubleshooting](docs/guide/troubleshooting.md) — common errors and fixes
 
 ## Development
 
