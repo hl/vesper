@@ -42,4 +42,12 @@ export class Logger {
   contextFilesLoaded(loaded: string[], skipped: string[]): void {
     this.emit("context_files_loaded", { loaded, skipped });
   }
+
+  contextWindowUnknown(model: string, fallbackWindow: number): void {
+    this.emit("context_window_unknown", { model, fallback_window: fallbackWindow });
+  }
+
+  contextEstimationDrift(estimated: number, actual: number, ratio: number): void {
+    this.emit("context_estimation_drift", { estimated, actual, ratio });
+  }
 }
