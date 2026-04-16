@@ -143,6 +143,16 @@ export function loadConfig(configPath: string): AgentConfig {
   assertStringArray(toolDelete, "tools.delete");
   assertStringArray(toolCommands, "tools.commands");
 
+  for (const entry of toolCommands as string[]) {
+    const parts = entry.trim().split(/\s+/);
+    if (parts.length > 2) {
+      throw new VesperError(
+        `Invalid "tools.commands" entry "${entry}": only "binary" or "binary arg" forms are supported`,
+        1,
+      );
+    }
+  }
+
   // Optional v0.2 fields
   const model = parsed.model;
   if (model !== undefined && typeof model !== "string") {

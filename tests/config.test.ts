@@ -335,6 +335,41 @@ tools:
     }
   });
 
+  it("exits with code 1 when tools.commands entry has more than 2 tokens", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools:
+  commands:
+    - "git commit --amend"
+`;
+    const path = writeYaml("bad-commands.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("tools.commands");
+    }
+  });
+
+  it("accepts tools.commands entries with 1 or 2 tokens", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools:
+  commands:
+    - "git"
+    - "bun test"
+`;
+    const path = writeYaml("good-commands.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.tools.commands).toEqual(["git", "bun test"]);
+  });
+
   it("exits with code 1 when token_budget is zero", () => {
     const yaml = `
 system_prompt: prompt.md
