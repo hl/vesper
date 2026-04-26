@@ -24,11 +24,14 @@ tools:
     - "**"
   write:
     - "src/**"
-    - "test/**"
+    - "tests/**"
     - "config/**"
+    - "docs/plans/task-queue.md"
+    - ".vesper/.scratchpad-builder.md"
   delete:
     - "src/**"
-    - "test/**"
+    - "tests/**"
     - "docs/plans/task-queue.md"
   commands:
+    - "make check"
     - "git commit"

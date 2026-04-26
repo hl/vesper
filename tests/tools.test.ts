@@ -35,6 +35,16 @@ describe("readFile", () => {
     const result = await readFile(join(tempDir, "does-not-exist.txt"));
     expect(result).toEqual({ error: "not_found" });
   });
+
+  it("caps serialized read_file result to maxResultSize", async () => {
+    const filePath = join(tempDir, "large.txt");
+    await fsWriteFile(filePath, "x".repeat(10_000));
+
+    const result = await readFile(filePath, 200);
+
+    expect(Buffer.byteLength(JSON.stringify(result), "utf-8")).toBeLessThanOrEqual(200);
+    expect("content" in result && result.content).toContain("[truncated:");
+  });
 });
 
 describe("listFiles", () => {
@@ -60,6 +70,17 @@ describe("listFiles", () => {
 
     const result = await listFiles(filePath);
     expect(result).toEqual({ error: "not_found" });
+  });
+
+  it("caps serialized list_files result to maxResultSize", async () => {
+    for (let i = 0; i < 200; i++) {
+      await fsWriteFile(join(tempDir, `file-${String(i).padStart(3, "0")}.txt`), "x");
+    }
+
+    const result = await listFiles(tempDir, 220);
+
+    expect(Buffer.byteLength(JSON.stringify(result), "utf-8")).toBeLessThanOrEqual(220);
+    expect("truncated" in result && result.truncated).toBe(true);
   });
 });
 
@@ -244,6 +265,20 @@ describe("runCommand", () => {
     expect(result.exit_code).toBe(124);
     expect(result.stderr).toContain("timed out");
   }, 10_000);
+
+  it("caps serialized run_command result to maxResultSize across stdout and stderr", async () => {
+    const script = [
+      'i=0; while [ "$i" -lt 1000 ]; do printf o; i=$((i + 1)); done',
+      'i=0; while [ "$i" -lt 1000 ]; do printf e >&2; i=$((i + 1)); done',
+    ].join("; ");
+
+    const result = await runCommand("sh", ["-c", script], tempDir, 5, [], 250);
+
+    expect(result.exit_code).toBe(0);
+    expect(Buffer.byteLength(JSON.stringify(result), "utf-8")).toBeLessThanOrEqual(250);
+    expect(result.stdout).toContain("[truncated:");
+    expect(result.stderr).toContain("[truncated:");
+  });
 });
 
 describe("truncateResult", () => {

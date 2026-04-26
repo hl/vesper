@@ -145,11 +145,14 @@ tools:
     - "**"
   write:
     - "src/**"
-    - "test/**"
+    - "tests/**"
+    - "docs/plans/task-queue.md"
+    - ".vesper/.scratchpad-builder.md"
   delete:
     - "src/**"
-    - "test/**"
+    - "tests/**"
+    - "docs/plans/task-queue.md"
   commands:
     - "git commit"
-    - "bun test"
+    - "make check"
 ```

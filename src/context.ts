@@ -117,13 +117,13 @@ function parseOutcome(parsed: Record<string, unknown>): string {
   return parsed.error ? `error: ${String(parsed.error)}` : "ok";
 }
 
-/** Count newlines via charcode scan (avoids regex match array allocation). */
-function countNewlines(text: string): number {
-  let count = 0;
+function countLines(text: string): number {
+  if (text.length === 0) return 0;
+  let lines = 1;
   for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) === 10) count++;
+    if (text.charCodeAt(i) === 10) lines++;
   }
-  return count;
+  return text.endsWith("\n") ? lines - 1 : lines;
 }
 
 /**
@@ -146,7 +146,7 @@ export function buildStubMetadata(
         return { toolName, target: path, outcome: parseOutcome(result) };
       }
       const content = typeof result.content === "string" ? result.content : resultString;
-      const lineCount = countNewlines(content);
+      const lineCount = countLines(content);
       const byteSize = Buffer.byteLength(content, "utf-8");
       return {
         toolName,

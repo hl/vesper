@@ -284,6 +284,25 @@ describe("vesper init", () => {
         expect((e as VesperError).message).toContain("symlink");
       }
     });
+
+    it("throws VesperError when a .vesper subdirectory is a symlink", async () => {
+      const outsideDir = mkdtempSync(join(tmpdir(), "vesper-init-outside-"));
+      try {
+        mkdirSync(join(tempDir, ".vesper"), { recursive: true });
+        symlinkSync(outsideDir, join(tempDir, ".vesper", "agents"));
+
+        try {
+          await init({ force: false, global: false, cwd: tempDir });
+          expect.unreachable("should have thrown");
+        } catch (e) {
+          expect(e).toBeInstanceOf(VesperError);
+          expect((e as VesperError).message).toContain("symlink");
+          expect(existsSync(join(outsideDir, "example.yml"))).toBe(false);
+        }
+      } finally {
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("error path: .gitignore is a symlink", () => {

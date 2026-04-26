@@ -212,9 +212,14 @@ describe("buildStubMetadata", () => {
     const meta = buildStubMetadata("read_file", { path: "src/app.ts" }, result);
     expect(meta.toolName).toBe("read_file");
     expect(meta.target).toBe("src/app.ts");
-    // 2 newlines in "line1\nline2\nline3" = 2 lines (newline count)
-    expect(meta.outcome).toBe("2 lines");
+    expect(meta.outcome).toBe("3 lines");
     expect(meta.size).toBeDefined();
+  });
+
+  it("builds metadata for read_file without counting trailing newline as an extra line", () => {
+    const result = JSON.stringify({ content: "line1\nline2\n" });
+    const meta = buildStubMetadata("read_file", { path: "src/app.ts" }, result);
+    expect(meta.outcome).toBe("2 lines");
   });
 
   it("builds metadata for write_file ok result", () => {

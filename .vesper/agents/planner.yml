@@ -18,6 +18,7 @@ tools:
     - "README.md"
   write:
     - "docs/plans/**"
+    - ".vesper/.scratchpad-planner.md"
   delete:
     - "docs/plans/spec-queue.md"
   commands: []

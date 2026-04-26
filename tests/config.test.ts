@@ -206,6 +206,17 @@ tools: {}
     expect(config.log_denied_calls).toBe(true);
   });
 
+  it("bundled builder config permits its documented workflow", () => {
+    const config = loadConfig(join(process.cwd(), ".vesper", "agents", "builder.yml"));
+
+    expect(config.tools.write).toContain("tests/**");
+    expect(config.tools.write).toContain("docs/plans/task-queue.md");
+    expect(config.tools.write).toContain(".vesper/.scratchpad-builder.md");
+    expect(config.tools.write).not.toContain("test/**");
+    expect(config.tools.commands).toContain("make check");
+    expect(config.tools.commands).toContain("git commit");
+  });
+
   it("exits with code 1 when system_prompt key is absent", () => {
     const yaml = `
 token_budget: 50000

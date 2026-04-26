@@ -76,6 +76,20 @@ describe("checkPathPermission", () => {
     expect(checkPathPermission("new-dir/sub/file.txt", cwd, ["**"])).toBe(true);
   });
 
+  it("permits paths when cwd is relative", () => {
+    const project = join(cwd, "relative-project");
+    mkdirSync(join(project, "src"), { recursive: true });
+    writeFileSync(join(project, "src", "index.ts"), "");
+
+    const originalCwd = process.cwd();
+    process.chdir(cwd);
+    try {
+      expect(checkPathPermission("src/index.ts", "relative-project", ["src/**"])).toBe(true);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
   it("permits write to single new directory that does not exist yet", () => {
     expect(checkPathPermission("brand-new/file.txt", cwd, ["brand-new/**"])).toBe(true);
   });

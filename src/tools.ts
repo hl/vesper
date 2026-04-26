@@ -18,6 +18,60 @@ export function truncateResult(content: string, limit: number): string {
   return `${truncated}${suffix}`;
 }
 
+function jsonByteLength(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf-8");
+}
+
+function capStringFieldsForJson<T extends Record<string, unknown>>(
+  result: T,
+  limit: number,
+  fields: string[],
+): T {
+  if (jsonByteLength(result) <= limit) return result;
+
+  const originals = fields
+    .map((field) => ({ field, value: result[field] }))
+    .filter((entry): entry is { field: string; value: string } => typeof entry.value === "string");
+
+  if (originals.length === 0) return result;
+
+  const originalBytes = originals.map((entry) => Buffer.byteLength(entry.value, "utf-8"));
+  const totalOriginalBytes = originalBytes.reduce((sum, bytes) => sum + bytes, 0);
+  if (totalOriginalBytes === 0) return result;
+
+  let low = 0;
+  let high = totalOriginalBytes;
+  let best: Record<string, unknown> = { ...result };
+  for (const entry of originals) {
+    best[entry.field] = "";
+  }
+
+  while (low <= high) {
+    const budget = Math.floor((low + high) / 2);
+    const candidate: Record<string, unknown> = { ...result };
+    let allocated = 0;
+
+    for (let i = 0; i < originals.length; i++) {
+      const entry = originals[i];
+      const allocation =
+        i === originals.length - 1
+          ? budget - allocated
+          : Math.floor((budget * originalBytes[i]) / totalOriginalBytes);
+      allocated += allocation;
+      candidate[entry.field] = truncateResult(entry.value, Math.max(0, allocation));
+    }
+
+    if (jsonByteLength(candidate) <= limit) {
+      best = candidate;
+      low = budget + 1;
+    } else {
+      high = budget - 1;
+    }
+  }
+
+  return best as T;
+}
+
 export async function readFile(
   resolvedPath: string,
   maxResultSize = 102400,
@@ -27,7 +81,7 @@ export async function readFile(
     return { error: "not_found" };
   }
   const content = await file.text();
-  return { content: truncateResult(content, maxResultSize) };
+  return capStringFieldsForJson({ content }, maxResultSize, ["content"]);
 }
 
 export async function listFiles(
@@ -38,7 +92,7 @@ export async function listFiles(
 > {
   try {
     const entries = await readdir(resolvedPath);
-    const serialized = JSON.stringify(entries);
+    const serialized = JSON.stringify({ entries });
     if (Buffer.byteLength(serialized, "utf-8") <= maxResultSize) {
       return { entries };
     }
@@ -47,7 +101,12 @@ export async function listFiles(
     let hi = entries.length;
     while (lo < hi) {
       const mid = Math.ceil((lo + hi) / 2);
-      if (Buffer.byteLength(JSON.stringify(entries.slice(0, mid)), "utf-8") <= maxResultSize) {
+      const candidate = {
+        entries: entries.slice(0, mid),
+        truncated: true,
+        total_entries: entries.length,
+      };
+      if (jsonByteLength(candidate) <= maxResultSize) {
         lo = mid;
       } else {
         hi = mid - 1;
@@ -161,27 +220,31 @@ export async function runCommand(
     if (hardKillTimer !== undefined) clearTimeout(hardKillTimer);
 
     if (timedOut) {
-      return {
-        stdout: truncateResult(stdout, maxResultSize),
-        stderr: truncateResult(
-          `${stderr}\nCommand timed out after ${timeoutSeconds}s`,
-          maxResultSize,
-        ),
-        exit_code: 124,
-      };
+      return capStringFieldsForJson(
+        {
+          stdout,
+          stderr: `${stderr}\nCommand timed out after ${timeoutSeconds}s`,
+          exit_code: 124,
+        },
+        maxResultSize,
+        ["stdout", "stderr"],
+      );
     }
 
-    return {
-      stdout: truncateResult(stdout, maxResultSize),
-      stderr: truncateResult(stderr, maxResultSize),
-      exit_code: proc.exitCode ?? 1,
-    };
+    return capStringFieldsForJson(
+      {
+        stdout: truncateResult(stdout, maxResultSize),
+        stderr: truncateResult(stderr, maxResultSize),
+        exit_code: proc.exitCode ?? 1,
+      },
+      maxResultSize,
+      ["stdout", "stderr"],
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      stdout: "",
-      stderr: message,
-      exit_code: 127,
-    };
+    return capStringFieldsForJson({ stdout: "", stderr: message, exit_code: 127 }, maxResultSize, [
+      "stdout",
+      "stderr",
+    ]);
   }
 }

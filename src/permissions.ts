@@ -44,15 +44,21 @@ export function resolveReal(inputPath: string, cwd: string): string | null {
 }
 
 export function checkPathPermission(inputPath: string, cwd: string, allowList: string[]): boolean {
+  let realCwd: string;
+  try {
+    realCwd = realpathSync(cwd);
+  } catch {
+    return false;
+  }
+
   // First: lexical check to catch obvious escapes cheaply
-  const lexical = resolve(cwd, inputPath);
-  if (!isContained(lexical, cwd)) {
+  const lexical = resolve(realCwd, inputPath);
+  if (!isContained(lexical, realCwd)) {
     return false;
   }
 
   // Second: resolve symlinks and re-check against real cwd
-  const realCwd = realpathSync(cwd);
-  const real = resolveReal(inputPath, cwd);
+  const real = resolveReal(inputPath, realCwd);
   if (real === null || !isContained(real, realCwd)) {
     return false;
   }

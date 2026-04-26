@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -13,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { VesperError } from "./errors.js";
+import { isContained } from "./permissions.js";
 import EXAMPLE_AGENT_YML from "./templates/example-agent.yml" with { type: "text" };
 import EXAMPLE_SYSTEM_PROMPT from "./templates/example-system-prompt.md" with { type: "text" };
 import CLAUDE_MD from "./templates/vesper-claude.md" with { type: "text" };
@@ -46,6 +48,14 @@ function rejectSymlink(path: string): void {
   }
   if (stat.isSymbolicLink()) {
     throw new VesperError(`${path} is a symlink — refusing to write (security risk)`);
+  }
+}
+
+function ensureDirectoryInside(path: string, root: string): void {
+  const realRoot = realpathSync(root);
+  const realPath = realpathSync(path);
+  if (!isContained(realPath, realRoot)) {
+    throw new VesperError(`${path} resolves outside ${root} — refusing to write`);
   }
 }
 
@@ -142,8 +152,10 @@ export async function init(options: InitOptions): Promise<void> {
 
   for (const dir of dirs) {
     const dirPath = join(root, dir);
+    rejectSymlink(dirPath);
     const existed = existsSync(dirPath);
     mkdirSync(dirPath, { recursive: true });
+    ensureDirectoryInside(dirPath, root);
     if (!existed) {
       created.push(`${displayPrefix}/${dir}/`);
     }

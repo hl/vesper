@@ -4,7 +4,7 @@ Skills and the scratchpad are two mechanisms for giving agents persistent contex
 
 ## Skills
 
-Skills are Markdown files injected into the agent's system prompt at startup. Use them for knowledge that should be available every run: coding standards, API references, workflow instructions.
+Skills are Markdown files injected into the agent's initial user message at startup. Use them for knowledge that should be available every run: coding standards, API references, workflow instructions.
 
 ### Configuration
 

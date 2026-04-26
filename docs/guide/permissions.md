@@ -104,7 +104,7 @@ When a tool call is denied, the response depends on `reveal_permissions`:
   "error": "permission_denied",
   "tool": "write_file",
   "target": "config/secrets.yml",
-  "allowed_patterns": ["src/**", "test/**"]
+  "allowed_patterns": ["src/**", "tests/**"]
 }
 ```
 

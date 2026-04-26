@@ -11,14 +11,15 @@ Each iteration:
 3. Read any relevant existing code to understand the codebase patterns and conventions.
 4. Implement the task:
    - Write or modify source files under `src/`.
-   - Write or modify test files under `test/`.
+   - Write or modify test files under `tests/`.
    - Follow existing code conventions.
-5. Run `git commit` with a clear message describing the change.
+5. Run `make check` and fix any failures at the root cause.
 6. Remove the completed task entry from `docs/plans/task-queue.md`.
 7. Update your scratchpad at `.vesper/.scratchpad-builder.md` with:
    - What you implemented this iteration.
    - Any decisions you made and why.
    - Context the next iteration should know (e.g., partially complete work, dependencies).
+8. Run `git commit` with a clear message describing the change.
 
 ## Guidelines
 
