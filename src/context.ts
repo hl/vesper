@@ -208,6 +208,21 @@ export function buildStubMetadata(
       const signalType = typeof input.type === "string" ? input.type : "unknown";
       return { toolName, target: signalType, outcome: parseOutcome(result) };
     }
+    case "subagent":
+    case "Task": {
+      const target =
+        typeof input.agent === "string"
+          ? input.agent
+          : typeof input.subagent_type === "string"
+            ? input.subagent_type
+            : "unknown";
+      if (result.error) {
+        return { toolName, target, outcome: parseOutcome(result) };
+      }
+      const signal = typeof result.signal === "string" ? result.signal : "unknown";
+      const exitCode = typeof result.exit_code === "number" ? result.exit_code : 0;
+      return { toolName, target, outcome: signal, size: `exit ${exitCode}` };
+    }
     default: {
       const target =
         typeof input.path === "string"

@@ -35,3 +35,4 @@ tools:
   commands:
     - "make check"
     - "git commit"
+  subagents: []

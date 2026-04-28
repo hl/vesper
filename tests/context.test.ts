@@ -270,6 +270,24 @@ describe("buildStubMetadata", () => {
     expect(meta.outcome).toBe("ok");
   });
 
+  it("builds metadata for subagent tool", () => {
+    const result = JSON.stringify({ ok: true, signal: "complete", exit_code: 0 });
+    const meta = buildStubMetadata("subagent", { agent: "reviewer" }, result);
+    expect(meta.toolName).toBe("subagent");
+    expect(meta.target).toBe("reviewer");
+    expect(meta.outcome).toBe("complete");
+    expect(meta.size).toBe("exit 0");
+  });
+
+  it("builds metadata for Task alias", () => {
+    const result = JSON.stringify({ ok: true, signal: "needs_approval", exit_code: 0 });
+    const meta = buildStubMetadata("Task", { subagent_type: "reviewer" }, result);
+    expect(meta.toolName).toBe("Task");
+    expect(meta.target).toBe("reviewer");
+    expect(meta.outcome).toBe("needs_approval");
+    expect(meta.size).toBe("exit 0");
+  });
+
   it("builds metadata for delete_file", () => {
     const result = JSON.stringify({ ok: true });
     const meta = buildStubMetadata("delete_file", { path: "tmp.txt" }, result);

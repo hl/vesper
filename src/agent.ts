@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
-import type { AgentConfig } from "./config.js";
+import { type AgentConfig, loadConfig, resolveAgent, type SignalConfig } from "./config.js";
 import {
   buildStubMetadata,
   compactConversation,
@@ -10,6 +11,7 @@ import {
   pruneMessages,
   type StubMetadata,
 } from "./context.js";
+import { VesperError } from "./errors.js";
 import { Logger } from "./logger.js";
 import {
   checkCommandPermission,
@@ -20,6 +22,7 @@ import {
 } from "./permissions.js";
 import {
   getSignalPaths,
+  type SignalPaths,
   writeAgentNeedsApproval,
   writeComplete,
   writeFailed,
@@ -145,6 +148,56 @@ const TOOL_DEFINITIONS: Anthropic.Tool[] = [
     },
     strict: true,
   },
+  {
+    name: "subagent",
+    description:
+      "Run another configured Vesper agent as a sequential sub-agent for a bounded task. " +
+      "Use this when instructions ask for a sub-agent, Agent, Task, spawn_agent, or subagent primitive. " +
+      "Only agent names listed in tools.subagents are permitted.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        agent: {
+          type: "string",
+          description: "Name of the configured Vesper agent to run as a sub-agent",
+        },
+        prompt: {
+          type: "string",
+          description: "Task prompt to send to the sub-agent",
+        },
+      },
+      required: ["agent", "prompt"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: "Task",
+    description:
+      "Compatibility alias for prompts written for Claude Code's Task sub-agent tool. " +
+      "Runs the configured Vesper agent named by subagent_type. " +
+      "Only agent names listed in tools.subagents are permitted.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        subagent_type: {
+          type: "string",
+          description: "Name of the configured Vesper agent to run as a sub-agent",
+        },
+        prompt: {
+          type: "string",
+          description: "Task prompt to send to the sub-agent",
+        },
+        description: {
+          type: "string",
+          description: "Short human-readable description of the delegated task",
+        },
+      },
+      required: ["subagent_type", "prompt"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
 ];
 
 // Signal tool is defined separately — it bypasses permission filtering and is always
@@ -261,7 +314,11 @@ export function loadSkills(skillsDir: string, cwd: string, logger: Logger): stri
 
 // R3: Filter tool definitions to only include tools the agent has permission to use.
 // The signal tool is always appended unconditionally (R11).
-function filterTools(config: AgentConfig): Anthropic.Tool[] {
+function filterTools(
+  config: AgentConfig,
+  subagentDepth = 0,
+  maxSubagentDepth = 1,
+): Anthropic.Tool[] {
   const toolPermissionMap: Record<string, string[]> = {
     read_file: config.tools.read,
     list_files: config.tools.read,
@@ -269,8 +326,13 @@ function filterTools(config: AgentConfig): Anthropic.Tool[] {
     patch_file: config.tools.write,
     delete_file: config.tools.delete,
     run_command: config.tools.commands,
+    subagent: config.tools.subagents,
+    Task: config.tools.subagents,
   };
   const filtered = TOOL_DEFINITIONS.filter((tool) => {
+    if ((tool.name === "subagent" || tool.name === "Task") && subagentDepth >= maxSubagentDepth) {
+      return false;
+    }
     const list = toolPermissionMap[tool.name];
     return list !== undefined && list.length > 0;
   });
@@ -332,6 +394,190 @@ function denialResponse(
     });
   }
   return JSON.stringify({ error: "permission_denied" });
+}
+
+function validateSubagentRequest(
+  toolName: string,
+  input: unknown,
+): { agent: string; prompt: string; description: string | null } | { error: string } {
+  const inp = typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {};
+  const agent =
+    toolName === "Task" ? validateString(inp, "subagent_type") : validateString(inp, "agent");
+  const prompt = validateString(inp, "prompt");
+  const description = validateString(inp, "description");
+
+  if (agent === null || agent.trim().length === 0) {
+    return {
+      error:
+        toolName === "Task"
+          ? "subagent_type must be a non-empty string"
+          : "agent must be a non-empty string",
+    };
+  }
+  if (prompt === null || prompt.trim().length === 0) {
+    return { error: "prompt must be a non-empty string" };
+  }
+
+  return { agent, prompt, description };
+}
+
+function loadContextFilesForSystemPrompt(files: string[], cwd: string): string {
+  let content = "";
+  let realCwd: string;
+  try {
+    realCwd = realpathSync(cwd);
+  } catch {
+    return content;
+  }
+
+  for (const file of files) {
+    const filePath = resolve(cwd, file);
+    if (!existsSync(filePath)) continue;
+
+    let realPath: string;
+    try {
+      realPath = realpathSync(filePath);
+    } catch {
+      continue;
+    }
+    if (!isContained(realPath, realCwd)) continue;
+
+    const text = readFileSync(realPath, "utf-8");
+    if (text.trim().length > 0) {
+      content += `\n\n# ${file}\n\n${text}`;
+    }
+  }
+
+  return content;
+}
+
+function loadAgentSystemPrompt(config: AgentConfig, vesperDir: string, cwd: string): string {
+  const systemPromptPath = resolve(vesperDir, config.system_prompt);
+  const realVesperDir = realpathSync(vesperDir);
+  let realSystemPromptPath: string;
+  try {
+    realSystemPromptPath = realpathSync(systemPromptPath);
+  } catch {
+    throw new VesperError(`System prompt file not found: ${systemPromptPath}`, 1);
+  }
+  if (!isContained(realSystemPromptPath, realVesperDir)) {
+    throw new VesperError(
+      `System prompt path "${config.system_prompt}" resolves outside vesper directory`,
+      1,
+    );
+  }
+
+  let systemPrompt = readFileSync(realSystemPromptPath, "utf-8");
+  if (config.context_files.length > 0) {
+    systemPrompt += loadContextFilesForSystemPrompt(config.context_files, cwd);
+  }
+  return systemPrompt;
+}
+
+function makeSubagentSignalConfig(agent: string): SignalConfig {
+  const id = randomUUID();
+  const safeAgent = agent.replace(/[^A-Za-z0-9_-]/g, "_");
+  return {
+    complete: `.vesper-subagent-${safeAgent}-${id}.complete`,
+    needs_approval: `.vesper-subagent-${safeAgent}-${id}.needs-approval`,
+    failed: `.vesper-subagent-${safeAgent}-${id}.failed`,
+  };
+}
+
+function readSubagentSignal(paths: SignalPaths): {
+  signal: "complete" | "needs_approval" | "failed" | "none";
+  payload: unknown;
+} {
+  if (existsSync(paths.complete)) {
+    return { signal: "complete", payload: null };
+  }
+  if (existsSync(paths.needsApproval)) {
+    return {
+      signal: "needs_approval",
+      payload: JSON.parse(readFileSync(paths.needsApproval, "utf-8")),
+    };
+  }
+  if (existsSync(paths.failed)) {
+    return { signal: "failed", payload: JSON.parse(readFileSync(paths.failed, "utf-8")) };
+  }
+  return { signal: "none", payload: null };
+}
+
+function cleanupSubagentSignals(paths: SignalPaths): void {
+  for (const path of [paths.complete, paths.needsApproval, paths.failed]) {
+    rmSync(path, { force: true });
+  }
+}
+
+async function executeSubagentTool(
+  toolName: string,
+  input: unknown,
+  cwd: string,
+  config: AgentConfig,
+  client: MessageClient,
+  subagentDepth: number,
+  maxSubagentDepth: number,
+): Promise<string> {
+  const request = validateSubagentRequest(toolName, input);
+  if ("error" in request) {
+    return JSON.stringify({ error: "invalid_input", message: request.error });
+  }
+
+  if (!config.tools.subagents.includes(request.agent)) {
+    if (config.log_denied_calls) {
+      logDeniedCall(toolName, request.agent);
+    }
+    return denialResponse(config, toolName, request.agent, config.tools.subagents);
+  }
+
+  if (subagentDepth >= maxSubagentDepth) {
+    return JSON.stringify({
+      error: "subagent_depth_exceeded",
+      message: `Sub-agent depth limit of ${maxSubagentDepth} reached`,
+    });
+  }
+
+  const signalConfig = makeSubagentSignalConfig(request.agent);
+  const signalPaths = getSignalPaths(cwd, signalConfig);
+
+  try {
+    const resolved = resolveAgent(request.agent, cwd);
+    const subagentConfig = loadConfig(resolved.configPath);
+    const systemPrompt = loadAgentSystemPrompt(subagentConfig, resolved.vesperDir, cwd);
+    const result = await runAgent(
+      subagentConfig,
+      systemPrompt,
+      request.prompt,
+      cwd,
+      request.agent,
+      client,
+      {
+        signalPaths,
+        subagentDepth: subagentDepth + 1,
+        maxSubagentDepth,
+      },
+    );
+    const { signal, payload } = readSubagentSignal(signalPaths);
+
+    return JSON.stringify({
+      ok: result.exitCode === 0 && signal !== "failed",
+      agent: request.agent,
+      description: request.description,
+      exit_code: result.exitCode,
+      signal,
+      message: result.finalText ?? null,
+      signal_payload: payload,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return JSON.stringify({
+      error: "subagent_failed",
+      agent: request.agent,
+      message,
+    });
+  } finally {
+    cleanupSubagentSignals(signalPaths);
+  }
 }
 
 export async function executeTool(
@@ -412,11 +658,18 @@ export async function executeTool(
 
 export interface RunAgentResult {
   exitCode: number;
+  finalText?: string | null;
 }
 
 /** Minimal interface for the Anthropic messages API, enabling test stubs. */
 export interface MessageClient {
   create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message>;
+}
+
+export interface RunAgentOptions {
+  signalPaths?: SignalPaths;
+  subagentDepth?: number;
+  maxSubagentDepth?: number;
 }
 
 export async function runAgent(
@@ -426,17 +679,20 @@ export async function runAgent(
   cwd: string,
   agentName: string,
   client?: MessageClient,
+  options?: RunAgentOptions,
 ): Promise<RunAgentResult> {
   const messagesClient: MessageClient = client ?? new Anthropic().messages;
   const logger = new Logger(config.log_events);
-  const signalPaths = getSignalPaths(cwd, config.signals);
+  const signalPaths = options?.signalPaths ?? getSignalPaths(cwd, config.signals);
+  const subagentDepth = options?.subagentDepth ?? 0;
+  const maxSubagentDepth = options?.maxSubagentDepth ?? 1;
 
   // R1: Configurable model per agent
   const model = config.model ?? DEFAULT_MODEL;
 
   // R3: Filter tools to match permissions; R2: cache_control applied inside filterTools.
   // Signal tool is always present, so tools is never empty.
-  const tools = filterTools(config);
+  const tools = filterTools(config, subagentDepth, maxSubagentDepth);
 
   // R2: System prompt as structured content block with cache_control
   const systemBlocks: Anthropic.TextBlockParam[] = [
@@ -486,6 +742,7 @@ export async function runAgent(
   // Stub metadata for tool result pruning (keyed by tool_use_id)
   const stubMetadata: Map<string, StubMetadata> = new Map();
   const modelWindow = getModelContextWindow(model, logger);
+  let finalText: string | null = null;
 
   // Pre-compute fixed cost tokens (system + tools) once before the loop
   const fixedCostTokens = estimatePayloadTokens(systemBlocks, tools, []);
@@ -680,6 +937,7 @@ export async function runAgent(
 
     // If no tool use, conversation is complete
     if (response.stop_reason !== "tool_use") {
+      finalText = extractLastText(response);
       break;
     }
 
@@ -717,6 +975,44 @@ export async function runAgent(
           content: signalContent,
         });
         stubMetadata.set(toolUse.id, buildStubMetadata("signal", input, signalContent));
+        continue;
+      }
+
+      if (toolUse.name === "subagent" || toolUse.name === "Task") {
+        const toolStart = Date.now();
+        let result: string;
+        try {
+          result = await executeSubagentTool(
+            toolUse.name,
+            toolUse.input,
+            cwd,
+            config,
+            messagesClient,
+            subagentDepth,
+            maxSubagentDepth,
+          );
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          result = JSON.stringify({ error: "internal_error", message: errMsg });
+        }
+        const toolDuration = Date.now() - toolStart;
+        const parsed = JSON.parse(result) as Record<string, unknown>;
+        const permitted = parsed.error !== "permission_denied";
+        const inp = toolUse.input as Record<string, unknown>;
+        const target =
+          typeof inp.agent === "string"
+            ? inp.agent
+            : typeof inp.subagent_type === "string"
+              ? inp.subagent_type
+              : toolUse.name;
+        logger.toolCall(toolUse.name, target, permitted, toolDuration);
+
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: result,
+        });
+        stubMetadata.set(toolUse.id, buildStubMetadata(toolUse.name, inp, result, parsed));
         continue;
       }
 
@@ -801,5 +1097,5 @@ export async function runAgent(
   }
   // else: default_signal is "none" and no signal recorded — no file written, brr continues
 
-  return { exitCode: 0 };
+  return { exitCode: 0, finalText };
 }

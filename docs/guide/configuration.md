@@ -36,6 +36,8 @@ tools:
   commands:                       # Allowed commands (see permissions docs)
     - "bun test"
     - "git commit"
+  subagents:                      # Agent names allowed for subagent / Task dispatch
+    - "reviewer"
 
 # --- Optional ---
 
@@ -74,6 +76,8 @@ context_management:
 **`tools`** arrays can be empty, which disables that tool category entirely. The tool won't appear in the API call at all — the model never sees it. See [Permissions](permissions.md) for matching rules.
 
 **`commands`** entries must have at most 2 tokens (binary name, optionally a subcommand). Config validation rejects longer entries. `"git commit"` is valid; `"git commit -m"` is not.
+
+**`subagents`** entries are exact configured agent names. When non-empty, Vesper exposes the `subagent` tool plus a `Task` compatibility alias for prompts written for Claude Code-style sub-agent dispatch. The parent agent can only call the listed agents, and each sub-agent runs with its own config and permissions.
 
 **`model`** determines the context window via longest prefix match:
 
@@ -155,4 +159,6 @@ tools:
   commands:
     - "git commit"
     - "make check"
+  subagents:
+    - "reviewer"
 ```

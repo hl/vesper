@@ -50,6 +50,7 @@ tools:
   write: []      # write_file and patch_file are removed from the API call
   delete: []     # delete_file is removed from the API call
   commands: []   # run_command is removed from the API call
+  subagents: []  # subagent and Task are removed from the API call
 ```
 
 ### Non-Existent Write Targets
@@ -88,6 +89,19 @@ command_env:
   - "DATABASE_URL"
   - "NODE_ENV"
 ```
+
+## Sub-Agent Permissions
+
+Sub-agent dispatch is gated by exact configured agent names:
+
+```yaml
+tools:
+  subagents:
+    - "reviewer"
+    - "researcher"
+```
+
+When `tools.subagents` is non-empty, Vesper exposes `subagent` and the Claude-style `Task` compatibility alias. A parent agent can only call listed agents. The called sub-agent then runs with its own config and permissions.
 
 ## Permission Denials
 

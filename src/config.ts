@@ -39,6 +39,7 @@ export interface AgentConfig {
     write: string[];
     delete: string[];
     commands: string[];
+    subagents: string[];
   };
 }
 
@@ -137,11 +138,13 @@ export function loadConfig(configPath: string): AgentConfig {
   const toolWrite = tools.write ?? [];
   const toolDelete = tools.delete ?? [];
   const toolCommands = tools.commands ?? [];
+  const toolSubagents = tools.subagents ?? [];
 
   assertStringArray(toolRead, "tools.read");
   assertStringArray(toolWrite, "tools.write");
   assertStringArray(toolDelete, "tools.delete");
   assertStringArray(toolCommands, "tools.commands");
+  assertStringArray(toolSubagents, "tools.subagents");
 
   for (const entry of toolCommands as string[]) {
     const parts = entry.trim().split(/\s+/);
@@ -326,6 +329,7 @@ export function loadConfig(configPath: string): AgentConfig {
       write: toolWrite,
       delete: toolDelete,
       commands: toolCommands,
+      subagents: toolSubagents,
     },
   };
 }

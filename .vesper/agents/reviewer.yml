@@ -16,3 +16,4 @@ tools:
     - "docs/reviews/**"
   delete: []
   commands: []
+  subagents: []

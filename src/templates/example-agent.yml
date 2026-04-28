@@ -34,3 +34,4 @@ tools:
   commands:                                # Allowed commands (binary or binary + first arg)
     - "bun test"
     - "git commit"
+  subagents: []                            # Allowed Vesper agent names for subagent / Task dispatch

@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -25,7 +26,11 @@ import type { AgentConfig } from "../src/config.js";
 // Factories
 // ---------------------------------------------------------------------------
 
-function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
+type AgentConfigOverrides = Omit<Partial<AgentConfig>, "tools"> & {
+  tools?: Partial<AgentConfig["tools"]>;
+};
+
+function makeConfig(overrides?: AgentConfigOverrides): AgentConfig {
   return {
     system_prompt: "test.md",
     token_budget: overrides?.token_budget ?? 100_000,
@@ -57,6 +62,7 @@ function makeConfig(overrides?: Partial<AgentConfig>): AgentConfig {
       write: ["**"],
       delete: ["**"],
       commands: [],
+      subagents: [],
       ...(overrides?.tools ?? {}),
     },
   };
@@ -126,6 +132,27 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
+
+function writeTestAgentConfig(
+  name: string,
+  options?: { systemPrompt?: string; tools?: string },
+): void {
+  const agentsDir = join(tempDir, ".vesper", "agents");
+  const promptsDir = join(tempDir, ".vesper", "system_prompts");
+  mkdirSync(agentsDir, { recursive: true });
+  mkdirSync(promptsDir, { recursive: true });
+  writeFileSync(
+    join(agentsDir, `${name}.yml`),
+    `
+system_prompt: system_prompts/${name}.md
+token_budget: 100000
+default_signal: complete
+tools:
+${options?.tools ?? "  read: []\n  write: []\n  delete: []\n  commands: []"}
+`,
+  );
+  writeFileSync(join(promptsDir, `${name}.md`), options?.systemPrompt ?? `You are ${name}.`);
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -487,6 +514,33 @@ describe("runAgent", () => {
     expect(toolNames).not.toContain("patch_file");
     expect(toolNames).not.toContain("delete_file");
     expect(toolNames).not.toContain("run_command");
+    expect(toolNames).not.toContain("subagent");
+    expect(toolNames).not.toContain("Task");
+  });
+
+  it("exposes sub-agent tools when tools.subagents allows at least one agent", async () => {
+    const config = makeConfig({
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["reviewer"] },
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "subagent-tool-agent", stubClient);
+
+    expect(capturedParams).toBeDefined();
+    const toolNames = capturedParams?.tools?.map((t) => (t as Anthropic.Tool).name);
+    expect(toolNames).toContain("subagent");
+    expect(toolNames).toContain("Task");
+    expect(toolNames).toContain("signal");
   });
 
   // R4: Permission transparency — reveal_permissions: true
@@ -1010,6 +1064,179 @@ describe("skill injection", () => {
     expect(content).toContain("[Previous Context]");
     expect(content).toContain("Scratchpad content.");
     expect(content).toContain("[Task]\nthe task");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sub-agent tool
+// ---------------------------------------------------------------------------
+
+describe("sub-agent tool", () => {
+  it("runs an allowed sub-agent and returns its final message", async () => {
+    writeTestAgentConfig("reviewer", {
+      tools: "  read: []\n  write: []\n  delete: []\n  commands: []\n  subagents:\n    - reviewer",
+    });
+    const config = makeConfig({
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["reviewer"] },
+    });
+
+    let callCount = 0;
+    let capturedSubagentParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    let capturedToolResult: string | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock(
+                "subagent",
+                { agent: "reviewer", prompt: "inspect the diff" },
+                "toolu_subagent",
+              ),
+            ],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        if (callCount === 2) {
+          capturedSubagentParams = params;
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock("Sub-agent found no issues.")],
+            usage: { input_tokens: 60, output_tokens: 20 },
+          });
+        }
+
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          const toolResult = lastMsg.content[0] as Anthropic.ToolResultBlockParam;
+          capturedToolResult = toolResult.content as string;
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      },
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "parent", stubClient);
+
+    expect(result.exitCode).toBe(0);
+    expect(callCount).toBe(3);
+    expect(capturedSubagentParams?.messages[0].content).toBe("inspect the diff");
+    const subagentToolNames = capturedSubagentParams?.tools?.map((t) => (t as Anthropic.Tool).name);
+    expect(subagentToolNames).not.toContain("subagent");
+    expect(subagentToolNames).not.toContain("Task");
+
+    expect(capturedToolResult).toBeDefined();
+    const parsed = JSON.parse(capturedToolResult as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent).toBe("reviewer");
+    expect(parsed.signal).toBe("complete");
+    expect(parsed.message).toBe("Sub-agent found no issues.");
+    expect(readdirSync(tempDir).some((entry) => entry.startsWith(".vesper-subagent-"))).toBe(false);
+  });
+
+  it("runs the Task compatibility alias using subagent_type", async () => {
+    writeTestAgentConfig("reviewer");
+    const config = makeConfig({
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["reviewer"] },
+    });
+
+    let callCount = 0;
+    let capturedToolResult: string | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock(
+                "Task",
+                {
+                  subagent_type: "reviewer",
+                  description: "Review the change",
+                  prompt: "review this change",
+                },
+                "toolu_task",
+              ),
+            ],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+        if (callCount === 2) {
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [makeTextBlock("Task alias result.")],
+            usage: { input_tokens: 60, output_tokens: 20 },
+          });
+        }
+
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          const toolResult = lastMsg.content[0] as Anthropic.ToolResultBlockParam;
+          capturedToolResult = toolResult.content as string;
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", stubClient);
+
+    expect(callCount).toBe(3);
+    expect(capturedToolResult).toBeDefined();
+    const parsed = JSON.parse(capturedToolResult as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent).toBe("reviewer");
+    expect(parsed.description).toBe("Review the change");
+    expect(parsed.message).toBe("Task alias result.");
+  });
+
+  it("denies sub-agent calls for agents outside tools.subagents", async () => {
+    const config = makeConfig({
+      reveal_permissions: true,
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["reviewer"] },
+    });
+
+    let callCount = 0;
+    let capturedToolResult: string | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock(
+                "subagent",
+                { agent: "builder", prompt: "do broader work" },
+                "toolu_denied",
+              ),
+            ],
+            usage: { input_tokens: 50, output_tokens: 30 },
+          });
+        }
+
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          const toolResult = lastMsg.content[0] as Anthropic.ToolResultBlockParam;
+          capturedToolResult = toolResult.content as string;
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", stubClient);
+
+    expect(callCount).toBe(2);
+    expect(capturedToolResult).toBeDefined();
+    const parsed = JSON.parse(capturedToolResult as string);
+    expect(parsed.error).toBe("permission_denied");
+    expect(parsed.tool).toBe("subagent");
+    expect(parsed.target).toBe("builder");
+    expect(parsed.allowed_patterns).toEqual(["reviewer"]);
   });
 });
 

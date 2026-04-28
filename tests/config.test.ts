@@ -145,6 +145,8 @@ tools:
   delete: []
   commands:
     - "bun test"
+  subagents:
+    - "reviewer"
 `;
 
   const minimalYaml = `
@@ -164,6 +166,7 @@ tools: {}
     expect(config.tools.write).toEqual(["src/**/*.ts"]);
     expect(config.tools.delete).toEqual([]);
     expect(config.tools.commands).toEqual(["bun test"]);
+    expect(config.tools.subagents).toEqual(["reviewer"]);
   });
 
   it("parses all optional keys with correct defaults when absent", () => {
@@ -177,6 +180,7 @@ tools: {}
     expect(config.tools.write).toEqual([]);
     expect(config.tools.delete).toEqual([]);
     expect(config.tools.commands).toEqual([]);
+    expect(config.tools.subagents).toEqual([]);
   });
 
   it("silently ignores completion block in YAML for backward compatibility", () => {
@@ -611,6 +615,42 @@ tools: {}
     expect(config.skills).toBe(".vesper/skills");
   });
 
+  it("exits with code 1 when tools.subagents contains non-strings", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools:
+  subagents:
+    - reviewer
+    - 42
+`;
+    const path = writeYaml("bad-subagents.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("tools.subagents");
+    }
+  });
+
+  it("parses tools.subagents correctly when it is a valid string array", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools:
+  subagents:
+    - reviewer
+    - researcher
+`;
+    const path = writeYaml("valid-subagents.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.tools.subagents).toEqual(["reviewer", "researcher"]);
+  });
+
   it("has correct v0.2 defaults when no new fields are specified", () => {
     const path = writeYaml("defaults-v02.yml", minimalYaml);
     const config = loadConfig(path);
@@ -622,6 +662,7 @@ tools: {}
     expect(config.scratchpad).toBeNull();
     expect(config.skills).toBeNull();
     expect(config.context_files).toEqual([]);
+    expect(config.tools.subagents).toEqual([]);
   });
 
   it("parses context_files correctly when it is a valid string array", () => {

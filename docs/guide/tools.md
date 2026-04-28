@@ -1,6 +1,6 @@
 # Tools
 
-Vesper provides six file/command tools gated by the permission arrays in the agent config, plus a `signal` tool that is always available. Tools not permitted are excluded from the API call entirely.
+Vesper provides six file/command tools gated by the permission arrays in the agent config, an optional sub-agent dispatch tool, plus a `signal` tool that is always available. Tools not permitted are excluded from the API call entirely.
 
 ## read_file
 
@@ -156,6 +156,56 @@ Execute a shell command.
 ```json
 { "error": "permission_denied" }
 ```
+
+## subagent
+
+Run another configured Vesper agent as a sequential sub-agent.
+
+**Permission:** `tools.subagents`
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `agent` | string | Configured agent name to run |
+| `prompt` | string | Task prompt to send to the sub-agent |
+
+**Returns:**
+
+```json
+{
+  "ok": true,
+  "agent": "reviewer",
+  "description": null,
+  "exit_code": 0,
+  "signal": "complete",
+  "message": "Final assistant text",
+  "signal_payload": null
+}
+```
+
+Sub-agents run with their own config, permissions, token budget, skills, scratchpad, and context files. Their signal files are written to temporary internal paths and cleaned up before the parent continues.
+
+**Errors:**
+
+```json
+{ "error": "invalid_input", "message": "prompt must be a non-empty string" }
+{ "error": "permission_denied" }
+{ "error": "subagent_failed", "agent": "reviewer", "message": "..." }
+{ "error": "subagent_depth_exceeded", "message": "..." }
+```
+
+## Task
+
+Compatibility alias for prompts written for Claude Code's `Task` sub-agent primitive.
+
+**Permission:** `tools.subagents`
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subagent_type` | string | Configured agent name to run |
+| `prompt` | string | Task prompt to send to the sub-agent |
+| `description` | string (optional) | Short task label included in the result |
+
+The result shape is the same as `subagent`.
 
 ## signal
 

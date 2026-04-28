@@ -17,3 +17,4 @@ tools:
     - ".vesper/skills/**"
   delete: []
   commands: []
+  subagents: []

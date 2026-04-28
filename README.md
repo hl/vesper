@@ -66,7 +66,7 @@ Global agents at `~/.config/vesper/` follow the same layout. Local agents take p
 
 ## Concepts
 
-**Tools** — Six file/command tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command` — each gated by glob patterns in the agent config. Plus a `signal` tool (always available) for explicit exit control.
+**Tools** — Six file/command tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command` — each gated by glob patterns in the agent config. Optional `subagent` / `Task` dispatch is gated by exact agent names in `tools.subagents`. Plus a `signal` tool (always available) for explicit exit control.
 
 **Permissions** — Allow-list only. File paths are resolved through symlinks via `realpathSync`. Commands match binary name, optionally with first argument. Agents with no permissions for a tool category never see that tool in the API call.
 
