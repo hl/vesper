@@ -69,7 +69,7 @@ The compacted conversation is a single user message with two sections:
 
 ```
 [Original Task]
-<the original stdin task>
+<the original task prompt>
 
 [Conversation Summary]
 <structured summary>

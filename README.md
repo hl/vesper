@@ -34,7 +34,14 @@ Then run:
 echo "Implement the auth module" | vesper run builder
 ```
 
-The task prompt is read from stdin. `vesper <agent>` also works as a shorthand for `vesper run <agent>`.
+Or pass the task entirely as command-line arguments:
+
+```sh
+vesper run builder Implement the auth module
+vesper run builder --task "Implement the auth module"
+```
+
+If no command-line task is provided, the task prompt is read from stdin. `vesper <agent>` also works as a shorthand for `vesper run <agent>`.
 
 ## Agent Configuration
 
@@ -87,7 +94,10 @@ This repo ships four example agents you can copy and adapt:
 ## CLI Reference
 
 ```
-vesper run <agent>    Run a named agent (reads task from stdin)
+vesper run <agent> [prompt..]
+                      Run a named agent (task from args or stdin)
+vesper run <agent> --task <prompt>
+                      Run a named agent with an explicit task prompt
 vesper init           Scaffold .vesper/ directory
 vesper init --global  Scaffold ~/.config/vesper/ for shared agents
 vesper init --force   Overwrite existing example files

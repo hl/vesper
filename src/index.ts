@@ -52,6 +52,8 @@ interface ParsedRunArgs {
   _: string[];
   agent: string;
   cwd: string;
+  prompt?: string[];
+  task?: string;
 }
 
 interface ParsedInitArgs {
@@ -73,12 +75,23 @@ export function buildParser(argv: Argv): Argv {
       describe: "Working directory",
       global: true,
     })
-    .command("run <agent>", "Run a Vesper agent", (y: Argv) =>
-      y.positional("agent", {
-        type: "string",
-        demandOption: true,
-        describe: "Name of the agent to run",
-      }),
+    .command("run <agent> [prompt..]", "Run a Vesper agent", (y: Argv) =>
+      y
+        .positional("agent", {
+          type: "string",
+          demandOption: true,
+          describe: "Name of the agent to run",
+        })
+        .positional("prompt", {
+          type: "string",
+          array: true,
+          describe: "Task prompt words. If omitted, stdin is used",
+        })
+        .option("task", {
+          alias: "t",
+          type: "string",
+          describe: "Task prompt. If omitted, stdin is used",
+        }),
     )
     .command("init", "Scaffold a .vesper/ project directory", (y: Argv) =>
       y
@@ -93,11 +106,22 @@ export function buildParser(argv: Argv): Argv {
           describe: "Scaffold ~/.config/vesper/ instead of .vesper/",
         }),
     )
-    .command("$0 [agent]", false, (y: Argv) =>
-      y.positional("agent", {
-        type: "string",
-        describe: "Name of the agent to run",
-      }),
+    .command("$0 [agent] [prompt..]", false, (y: Argv) =>
+      y
+        .positional("agent", {
+          type: "string",
+          describe: "Name of the agent to run",
+        })
+        .positional("prompt", {
+          type: "string",
+          array: true,
+          describe: "Task prompt words. If omitted, stdin is used",
+        })
+        .option("task", {
+          alias: "t",
+          type: "string",
+          describe: "Task prompt. If omitted, stdin is used",
+        }),
     )
     .strict();
 }
@@ -110,7 +134,32 @@ export function checkReservedName(agentName: string): void {
   }
 }
 
-async function handleRun(agentName: string, cwd: string): Promise<void> {
+export function getTaskPromptFromArgs(args: {
+  prompt?: string[];
+  task?: string;
+}): string | undefined {
+  const positionalPrompt =
+    args.prompt !== undefined && args.prompt.length > 0 ? args.prompt.join(" ") : undefined;
+
+  if (args.task !== undefined && positionalPrompt !== undefined) {
+    throw new VesperError(
+      "Provide the task prompt either as --task or positional arguments, not both",
+      1,
+    );
+  }
+
+  return args.task ?? positionalPrompt;
+}
+
+export function resolveTaskPrompt(cliTaskPrompt: string | undefined, stdinPrompt: string): string {
+  const taskPrompt = cliTaskPrompt ?? stdinPrompt;
+  if (!taskPrompt.trim()) {
+    throw new VesperError("No task prompt provided. Pass one as arguments or on stdin", 1);
+  }
+  return taskPrompt;
+}
+
+async function handleRun(agentName: string, cwd: string, cliTaskPrompt?: string): Promise<void> {
   // Reserved name check
   checkReservedName(agentName);
 
@@ -174,11 +223,9 @@ async function handleRun(agentName: string, cwd: string): Promise<void> {
       }
     }
 
-    // Read task prompt from stdin
-    const taskPrompt = await Bun.stdin.text();
-    if (!taskPrompt.trim()) {
-      throw new VesperError("No task prompt provided on stdin", 1);
-    }
+    // Prefer a CLI prompt; fall back to stdin for existing orchestrator integrations.
+    const stdinPrompt = cliTaskPrompt === undefined ? await Bun.stdin.text() : "";
+    const taskPrompt = resolveTaskPrompt(cliTaskPrompt, stdinPrompt);
 
     // Run the agent
     const result = await runAgent(config, systemPrompt, taskPrompt, cwd, agentName);
@@ -200,7 +247,8 @@ async function main(): Promise<void> {
   const cwd = argv.cwd;
 
   if (command === "run") {
-    await handleRun((argv as ParsedRunArgs).agent, cwd);
+    const runArgs = argv as ParsedRunArgs;
+    await handleRun(runArgs.agent, cwd, getTaskPromptFromArgs(runArgs));
   } else if (command === "init") {
     const initArgs = argv as ParsedInitArgs;
     try {
@@ -213,13 +261,17 @@ async function main(): Promise<void> {
     }
   } else if ("agent" in argv && argv.agent) {
     // Default command: vesper <agent> alias
-    await handleRun(argv.agent, cwd);
+    const runArgs = argv as ParsedRunArgs;
+    await handleRun(runArgs.agent, cwd, getTaskPromptFromArgs(runArgs));
   } else {
     parser.showHelp();
   }
 }
 
 main().catch((err) => {
+  if (err instanceof VesperError) {
+    exitWithError(err.message, err.code);
+  }
   const message = err instanceof Error ? err.message : String(err);
   process.stderr.write(`[vesper] Fatal: ${message}\n`);
   process.exit(1);

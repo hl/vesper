@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import yargs from "yargs";
 import { VesperError } from "../src/errors.js";
-import { buildParser, checkReservedName, loadContextFiles, RESERVED_NAMES } from "../src/index.js";
+import {
+  buildParser,
+  checkReservedName,
+  getTaskPromptFromArgs,
+  loadContextFiles,
+  RESERVED_NAMES,
+  resolveTaskPrompt,
+} from "../src/index.js";
 
 /**
  * Parse CLI args through the yargs config without executing handlers.
@@ -22,9 +29,27 @@ describe("CLI subcommand routing", () => {
     expect((argv._ as string[])[0]).toBe("run");
   });
 
+  it("vesper run <agent> [prompt..] parses task prompt words", async () => {
+    const argv = await parseArgs(["run", "builder", "fix", "the", "bug"]);
+    expect(argv.agent).toBe("builder");
+    expect(argv.prompt).toEqual(["fix", "the", "bug"]);
+  });
+
+  it("vesper run <agent> --task parses a task option", async () => {
+    const argv = await parseArgs(["run", "builder", "--task", "fix the bug"]);
+    expect(argv.agent).toBe("builder");
+    expect(argv.task).toBe("fix the bug");
+  });
+
   it("vesper <agent> (default command) resolves agent via positional", async () => {
     const argv = await parseArgs(["builder"]);
     expect(argv.agent).toBe("builder");
+  });
+
+  it("vesper <agent> [prompt..] parses task prompt words", async () => {
+    const argv = await parseArgs(["builder", "fix", "the", "bug"]);
+    expect(argv.agent).toBe("builder");
+    expect(argv.prompt).toEqual(["fix", "the", "bug"]);
   });
 
   it("vesper init parses as init command", async () => {
@@ -36,6 +61,34 @@ describe("CLI subcommand routing", () => {
     const argv = await parseArgs([]);
     expect(argv.agent).toBeUndefined();
     expect((argv._ as string[]).length).toBe(0);
+  });
+});
+
+describe("task prompt resolution", () => {
+  it("joins positional prompt words", () => {
+    expect(getTaskPromptFromArgs({ prompt: ["fix", "the", "bug"] })).toBe("fix the bug");
+  });
+
+  it("uses --task when provided", () => {
+    expect(getTaskPromptFromArgs({ task: "fix the bug" })).toBe("fix the bug");
+  });
+
+  it("rejects mixed --task and positional prompt input", () => {
+    expect(() => getTaskPromptFromArgs({ prompt: ["positional"], task: "option" })).toThrow(
+      VesperError,
+    );
+  });
+
+  it("prefers CLI task prompt over stdin", () => {
+    expect(resolveTaskPrompt("from args", "from stdin")).toBe("from args");
+  });
+
+  it("falls back to stdin when no CLI task prompt is provided", () => {
+    expect(resolveTaskPrompt(undefined, "from stdin")).toBe("from stdin");
+  });
+
+  it("rejects an empty resolved task prompt", () => {
+    expect(() => resolveTaskPrompt(undefined, "  \n")).toThrow(VesperError);
   });
 });
 

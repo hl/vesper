@@ -57,7 +57,7 @@ Set to `null` or omit to disable.
 <scratchpad contents>
 
 [Task]
-<stdin task>
+<task prompt>
 ```
 
 2. **During execution** — the agent can write to the scratchpad via `write_file` or `patch_file` (the path must be within `tools.write` permissions)
@@ -88,7 +88,7 @@ When both skills and scratchpad are present, the initial user message is compose
 <scratchpad contents>
 
 [Task]
-<stdin task>
+<task prompt>
 ```
 
 When only one is present, the other section is omitted.

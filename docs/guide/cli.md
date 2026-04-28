@@ -3,14 +3,23 @@
 ## Usage
 
 ```
-vesper [--cwd <path>] <command>
+vesper [--cwd <path>] run <agent> [prompt..]
+vesper [--cwd <path>] <agent> [prompt..]
+vesper [--cwd <path>] init
 ```
 
 ## Commands
 
 ### `vesper run <agent>`
 
-Run a named agent. The task is read from stdin.
+Run a named agent. The task can be provided as command-line arguments:
+
+```sh
+vesper run builder Implement the auth module
+vesper run builder --task "Implement the auth module"
+```
+
+If no command-line task is provided, Vesper reads the task from stdin:
 
 ```sh
 echo "Implement the auth module" | vesper run builder
@@ -19,7 +28,7 @@ echo "Implement the auth module" | vesper run builder
 `vesper <agent>` is shorthand for `vesper run <agent>`:
 
 ```sh
-echo "Review the PR" | vesper reviewer
+vesper reviewer Review the PR
 ```
 
 Agent configs are resolved from `.vesper/agents/<agent>.yml` locally, then `~/.config/vesper/agents/<agent>.yml` globally.
@@ -66,6 +75,12 @@ Existing files are preserved unless `--force` is specified. Symlinks on any targ
 | `--version` | Print version |
 | `--help` | Show help |
 
+## Run Options
+
+| Option | Description |
+|--------|-------------|
+| `--task <prompt>`, `-t <prompt>` | Provide the task prompt without reading stdin |
+
 ## Environment
 
 Vesper requires an `ANTHROPIC_API_KEY` environment variable for the Claude API.
@@ -77,11 +92,21 @@ Vesper requires an `ANTHROPIC_API_KEY` environment variable for the Claude API.
 | `0` | Completed successfully, or stopped by token budget / approval |
 | `1` | Error: config invalid, system prompt missing, API failure, context overflow, stale signals |
 
-## Stdin
+## Task Input
 
-The task prompt is always read from stdin. If stdin is empty or not connected, the agent receives an empty task.
+The task prompt can come from command-line arguments or stdin. Command-line input takes precedence. If both `--task` and positional prompt words are provided, Vesper exits with an error.
 
-Pipe from files, heredocs, or other commands:
+Pass short prompts directly:
+
+```sh
+# Positional prompt words
+vesper run builder Implement user authentication
+
+# Explicit task option
+vesper run builder --task "Implement user authentication with JWT tokens."
+```
+
+Pipe longer prompts from files, heredocs, or other commands:
 
 ```sh
 # From a file
