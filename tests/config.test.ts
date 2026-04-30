@@ -162,6 +162,7 @@ tools: {}
     expect(config.system_prompt).toBe("prompt.md");
     expect(config.token_budget).toBe(100000);
     expect(config.log_denied_calls).toBe(false);
+    expect(config.provider).toBe("anthropic");
     expect(config.tools.read).toEqual(["src/**/*.ts"]);
     expect(config.tools.write).toEqual(["src/**/*.ts"]);
     expect(config.tools.delete).toEqual([]);
@@ -176,6 +177,7 @@ tools: {}
     expect(config.system_prompt).toBe("prompt.md");
     expect(config.token_budget).toBe(50000);
     expect(config.log_denied_calls).toBe(false);
+    expect(config.provider).toBe("anthropic");
     expect(config.tools.read).toEqual([]);
     expect(config.tools.write).toEqual([]);
     expect(config.tools.delete).toEqual([]);
@@ -509,6 +511,38 @@ tools: {}
     const path = writeYaml("valid-model.yml", yaml);
     const config = loadConfig(path);
     expect(config.model).toBe("claude-sonnet-4-20250514");
+  });
+
+  it("exits with code 1 when provider is unsupported", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+provider: other
+tools: {}
+`;
+    const path = writeYaml("bad-provider.yml", yaml);
+
+    expect(() => loadConfig(path)).toThrow(VesperError);
+
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).code).toBe(1);
+      expect((e as VesperError).message).toContain("provider");
+    }
+  });
+
+  it("parses provider correctly when it is openai", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+provider: openai
+tools: {}
+`;
+    const path = writeYaml("openai-provider.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.provider).toBe("openai");
   });
 
   it("exits with code 1 when command_timeout is zero", () => {

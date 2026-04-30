@@ -41,7 +41,8 @@ tools:
 
 # --- Optional ---
 
-model: claude-sonnet-4-6          # Claude model ID (default: claude-sonnet-4-6)
+provider: anthropic               # "anthropic" or "openai" (default: anthropic)
+model: claude-sonnet-4-6          # Model ID (provider default when omitted)
 command_timeout: 30                # Seconds before killing a command (default: 30)
 max_tool_result_size: 102400      # Truncate tool results beyond this many bytes (default: 100KB)
 log_denied_calls: false            # Log permission denials to stderr
@@ -79,7 +80,12 @@ context_management:
 
 **`subagents`** entries are exact configured agent names. When non-empty, Vesper exposes the `subagent` tool plus a `Task` compatibility alias for prompts written for Claude Code-style sub-agent dispatch. The parent agent can only call the listed agents, and each sub-agent runs with its own config and permissions.
 
-**`model`** determines the context window via longest prefix match:
+**`provider`** selects the model API. `anthropic` uses the Anthropic Messages API and
+requires `ANTHROPIC_API_KEY`. `openai` uses the OpenAI Responses API and requires
+`OPENAI_API_KEY`.
+
+**`model`** defaults to `claude-sonnet-4-6` for `provider: anthropic` and `gpt-5.5`
+for `provider: openai`. It also determines the context window via longest prefix match:
 
 | Prefix | Context Window |
 |--------|---------------|
@@ -87,6 +93,9 @@ context_management:
 | `claude-opus-4` | 200,000 |
 | `claude-haiku-4` | 200,000 |
 | `claude-haiku-3` | 200,000 |
+| `gpt-5.5` | 1,000,000 |
+| `gpt-5-codex` | 400,000 |
+| `gpt-5.2-codex` | 400,000 |
 | Unknown | 200,000 (fallback) |
 
 **`default_signal`** controls what happens when the agent's conversation ends without an explicit signal. `"complete"` (default) writes the complete signal. `"none"` writes nothing — useful when the agent is expected to signal explicitly.
@@ -104,6 +113,7 @@ Files that don't exist, are empty, or resolve outside cwd via symlinks are silen
 ## Validation Rules
 
 - `token_budget` must be a finite positive number
+- `provider` must be `anthropic` or `openai`
 - `command_timeout` must be a finite positive number
 - `max_tool_result_size` must be a finite positive number
 - Threshold values must be between 0 (exclusive) and 1 (inclusive)
@@ -126,6 +136,24 @@ tools:
 ```
 
 Read-only agent with no write, delete, or command access.
+
+## Example: OpenAI Agent
+
+```yaml
+system_prompt: system_prompts/builder.md
+token_budget: 100000
+provider: openai
+# model omitted: defaults to gpt-5.5
+
+tools:
+  read:
+    - "**"
+  write:
+    - "src/**"
+  delete: []
+  commands:
+    - "bun test"
+```
 
 ## Example: Full-Access Builder
 

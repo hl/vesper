@@ -18,6 +18,7 @@ import {
   extractLastText,
   isContextLengthError,
   type MessageClient,
+  OpenAIResponsesMessageClient,
   runAgent,
 } from "../src/agent.js";
 import type { AgentConfig } from "../src/config.js";
@@ -35,6 +36,7 @@ function makeConfig(overrides?: AgentConfigOverrides): AgentConfig {
     system_prompt: "test.md",
     token_budget: overrides?.token_budget ?? 100_000,
     log_denied_calls: overrides?.log_denied_calls ?? false,
+    provider: overrides?.provider ?? "anthropic",
     model: overrides?.model,
     reveal_permissions: overrides?.reveal_permissions ?? false,
     log_events: overrides?.log_events ?? false,
@@ -456,6 +458,28 @@ describe("runAgent", () => {
 
     expect(capturedParams).toBeDefined();
     expect(capturedParams?.model).toBe("claude-opus-4-20250514");
+  });
+
+  it("uses gpt-5.5 as the default model for the OpenAI provider", async () => {
+    const config = makeConfig({
+      provider: "openai",
+    });
+
+    let capturedParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        capturedParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "openai-model-agent", stubClient);
+
+    expect(capturedParams).toBeDefined();
+    expect(capturedParams?.model).toBe("gpt-5.5");
   });
 
   // R2: Prompt caching — system is an array with cache_control
@@ -1237,6 +1261,120 @@ describe("sub-agent tool", () => {
     expect(parsed.tool).toBe("subagent");
     expect(parsed.target).toBe("builder");
     expect(parsed.allowed_patterns).toEqual(["reviewer"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OpenAI Responses adapter
+// ---------------------------------------------------------------------------
+
+describe("OpenAIResponsesMessageClient", () => {
+  it("converts Vesper tools and OpenAI function calls through the Responses API", async () => {
+    let capturedParams: Record<string, unknown> | undefined;
+    const client = new OpenAIResponsesMessageClient({
+      responses: {
+        create: async (params) => {
+          capturedParams = params as unknown as Record<string, unknown>;
+          return {
+            id: "resp_test",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                call_id: "call_read",
+                name: "read_file",
+                arguments: '{"path":"src/index.ts"}',
+              },
+            ],
+            usage: { input_tokens: 12, output_tokens: 4 },
+          };
+        },
+      },
+    });
+
+    const response = await client.create({
+      model: "gpt-5.5",
+      max_tokens: 4096,
+      system: [{ type: "text", text: "System instructions." }],
+      tools: [
+        {
+          name: "read_file",
+          description: "Read a file.",
+          input_schema: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+          strict: true,
+        },
+      ],
+      messages: [{ role: "user", content: "Read src/index.ts" }],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    expect(capturedParams?.model).toBe("gpt-5.5");
+    expect(capturedParams?.instructions).toBe("System instructions.");
+    const tools = capturedParams?.tools as Array<Record<string, unknown>>;
+    expect(tools[0].type).toBe("function");
+    expect(tools[0].name).toBe("read_file");
+    expect(response.stop_reason).toBe("tool_use");
+    expect(response.usage.input_tokens).toBe(12);
+    const toolUse = response.content[0] as Anthropic.ToolUseBlock;
+    expect(toolUse.type).toBe("tool_use");
+    expect(toolUse.id).toBe("call_read");
+    expect(toolUse.name).toBe("read_file");
+    expect(toolUse.input).toEqual({ path: "src/index.ts" });
+  });
+
+  it("passes prior function calls and function call outputs back to OpenAI", async () => {
+    let capturedInput: Array<Record<string, unknown>> | undefined;
+    const client = new OpenAIResponsesMessageClient({
+      responses: {
+        create: async (params) => {
+          capturedInput = params.input as unknown as Array<Record<string, unknown>>;
+          return {
+            id: "resp_done",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                content: [{ type: "output_text", text: "Done." }],
+              },
+            ],
+            output_text: "Done.",
+            usage: { input_tokens: 20, output_tokens: 5 },
+          };
+        },
+      },
+    });
+
+    const response = await client.create({
+      model: "gpt-5.5",
+      max_tokens: 4096,
+      system: [{ type: "text", text: "System." }],
+      messages: [
+        { role: "user", content: "Read a file" },
+        {
+          role: "assistant",
+          content: [makeToolUseBlock("read_file", { path: "a.txt" }, "call_read")],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_read",
+              content: '{"content":"hello"}',
+            },
+          ],
+        },
+      ],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    expect(capturedInput?.some((item) => item.type === "function_call")).toBe(true);
+    expect(capturedInput?.some((item) => item.type === "function_call_output")).toBe(true);
+    expect(response.stop_reason).toBe("end_turn");
+    expect(extractLastText(response)).toBe("Done.");
   });
 });
 

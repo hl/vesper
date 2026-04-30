@@ -49,6 +49,18 @@ describe("getModelContextWindow", () => {
     expect(getModelContextWindow("claude-haiku-3")).toBe(200_000);
   });
 
+  it("matches gpt-5.5 context window", () => {
+    expect(getModelContextWindow("gpt-5.5")).toBe(1_000_000);
+  });
+
+  it("matches gpt-5-codex context window", () => {
+    expect(getModelContextWindow("gpt-5-codex")).toBe(400_000);
+  });
+
+  it("matches gpt-5.2-codex context window", () => {
+    expect(getModelContextWindow("gpt-5.2-codex")).toBe(400_000);
+  });
+
   it("returns default 200_000 for unknown model", () => {
     expect(getModelContextWindow("unknown-model-v1")).toBe(200_000);
   });

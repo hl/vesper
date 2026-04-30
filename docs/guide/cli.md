@@ -83,7 +83,12 @@ Existing files are preserved unless `--force` is specified. Symlinks on any targ
 
 ## Environment
 
-Vesper requires an `ANTHROPIC_API_KEY` environment variable for the Claude API.
+Vesper reads provider API keys from the standard SDK environment variables:
+
+| Provider | Required variable |
+|----------|-------------------|
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` | `OPENAI_API_KEY` |
 
 ## Exit Codes
 

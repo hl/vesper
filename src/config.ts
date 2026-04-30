@@ -22,6 +22,7 @@ export interface AgentConfig {
   system_prompt: string;
   token_budget: number;
   log_denied_calls: boolean;
+  provider: "anthropic" | "openai";
   model: string | undefined;
   reveal_permissions: boolean;
   log_events: boolean;
@@ -160,6 +161,11 @@ export function loadConfig(configPath: string): AgentConfig {
   const model = parsed.model;
   if (model !== undefined && typeof model !== "string") {
     throw new VesperError(`"model" must be a string in ${configPath}`, 1);
+  }
+
+  const provider = parsed.provider ?? "anthropic";
+  if (provider !== "anthropic" && provider !== "openai") {
+    throw new VesperError(`"provider" must be "anthropic" or "openai" in ${configPath}`, 1);
   }
 
   const commandTimeout = parsed.command_timeout ?? 30;
@@ -311,6 +317,7 @@ export function loadConfig(configPath: string): AgentConfig {
     token_budget: parsed.token_budget,
     log_denied_calls:
       typeof parsed.log_denied_calls === "boolean" ? parsed.log_denied_calls : false,
+    provider,
     model: typeof model === "string" ? model : undefined,
     reveal_permissions:
       typeof parsed.reveal_permissions === "boolean" ? parsed.reveal_permissions : false,

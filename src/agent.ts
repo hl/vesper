@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { type AgentConfig, loadConfig, resolveAgent, type SignalConfig } from "./config.js";
 import {
   buildStubMetadata,
@@ -30,7 +31,8 @@ import {
 } from "./signals.js";
 import { deleteFile, listFiles, patchFile, readFile, runCommand, writeFile } from "./tools.js";
 
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
+const DEFAULT_OPENAI_MODEL = "gpt-5.5";
 const MAX_OUTPUT_TOKENS = 4096;
 const MAX_CONTEXT_LENGTH = 1000;
 
@@ -43,11 +45,16 @@ const CONTEXT_OVERFLOW_PATTERNS = [
 ];
 
 export function isContextLengthError(err: unknown): err is BadRequestError {
-  return (
-    err instanceof BadRequestError &&
-    err.type === "invalid_request_error" &&
-    CONTEXT_OVERFLOW_PATTERNS.some((p) => err.message.toLowerCase().includes(p))
-  );
+  if (err instanceof BadRequestError && err.type === "invalid_request_error") {
+    return CONTEXT_OVERFLOW_PATTERNS.some((p) => err.message.toLowerCase().includes(p));
+  }
+  if (err instanceof BadRequestError) {
+    return false;
+  }
+  if (err instanceof Error) {
+    return CONTEXT_OVERFLOW_PATTERNS.some((p) => err.message.toLowerCase().includes(p));
+  }
+  return false;
 }
 
 export function extractLastText(response: Anthropic.Message): string | null {
@@ -661,9 +668,248 @@ export interface RunAgentResult {
   finalText?: string | null;
 }
 
-/** Minimal interface for the Anthropic messages API, enabling test stubs. */
+/** Internal Anthropic-shaped message interface, enabling test stubs and provider adapters. */
 export interface MessageClient {
   create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message>;
+}
+
+type OpenAIResponse = {
+  id?: string;
+  status?: string;
+  incomplete_details?: { reason?: string | null } | null;
+  output?: Array<Record<string, unknown>>;
+  output_text?: string;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+  } | null;
+};
+
+interface OpenAIResponsesClient {
+  responses: {
+    create(params: OpenAI.Responses.ResponseCreateParamsNonStreaming): Promise<unknown>;
+  };
+}
+
+function defaultModelForProvider(provider: AgentConfig["provider"]): string {
+  return provider === "openai" ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
+}
+
+function createDefaultMessageClient(provider: AgentConfig["provider"]): MessageClient {
+  if (provider === "openai") {
+    return new OpenAIResponsesMessageClient();
+  }
+  return new Anthropic().messages;
+}
+
+function stringifySystem(system: Anthropic.MessageCreateParamsNonStreaming["system"]): string {
+  if (typeof system === "string") return system;
+  if (!Array.isArray(system)) return "";
+  return system
+    .map((block) => (block.type === "text" ? block.text : ""))
+    .filter((text) => text.length > 0)
+    .join("\n\n");
+}
+
+function normalizeToolResultContent(content: Anthropic.ToolResultBlockParam["content"]): string {
+  if (typeof content === "string") return content;
+  return JSON.stringify(content);
+}
+
+function convertMessageTextContent(content: Anthropic.MessageParam["content"]): string {
+  if (typeof content === "string") return content;
+  const parts: string[] = [];
+  for (const block of content) {
+    if (block.type === "text") {
+      parts.push(block.text);
+    }
+  }
+  return parts.join("\n\n");
+}
+
+function convertMessagesToOpenAIInput(
+  messages: Anthropic.MessageParam[],
+): Array<Record<string, unknown>> {
+  const input: Array<Record<string, unknown>> = [];
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      if (typeof message.content === "string") {
+        input.push({ role: "user", content: message.content });
+        continue;
+      }
+
+      const textParts: string[] = [];
+      for (const block of message.content) {
+        if (block.type === "tool_result") {
+          input.push({
+            type: "function_call_output",
+            call_id: block.tool_use_id,
+            output: normalizeToolResultContent(block.content),
+          });
+        } else if (block.type === "text") {
+          textParts.push(block.text);
+        }
+      }
+      if (textParts.length > 0) {
+        input.push({ role: "user", content: textParts.join("\n\n") });
+      }
+      continue;
+    }
+
+    const content = Array.isArray(message.content) ? message.content : [];
+    const text = convertMessageTextContent(message.content);
+    if (text.length > 0) {
+      input.push({ role: "assistant", content: text });
+    }
+    for (const block of content) {
+      if (block.type !== "tool_use") continue;
+      input.push({
+        type: "function_call",
+        call_id: block.id,
+        name: block.name,
+        arguments: JSON.stringify(block.input ?? {}),
+      });
+    }
+  }
+
+  return input;
+}
+
+function isOpenAIStrictCompatible(schema: Anthropic.Tool.InputSchema): boolean {
+  const properties =
+    typeof schema.properties === "object" && schema.properties !== null ? schema.properties : {};
+  const required = Array.isArray(schema.required) ? new Set(schema.required) : new Set();
+  return Object.keys(properties).every((key) => required.has(key));
+}
+
+function convertToolsToOpenAI(tools: Anthropic.Tool[] | undefined): Array<Record<string, unknown>> {
+  return (tools ?? []).map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.input_schema,
+    strict: tool.strict === true && isOpenAIStrictCompatible(tool.input_schema),
+  }));
+}
+
+function parseOpenAIArguments(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string" || value.trim().length === 0) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function extractOpenAITextContent(item: Record<string, unknown>): string[] {
+  const content = Array.isArray(item.content) ? item.content : [];
+  const parts: string[] = [];
+  for (const block of content) {
+    if (typeof block !== "object" || block === null) continue;
+    const record = block as Record<string, unknown>;
+    if (
+      (record.type === "output_text" || record.type === "text") &&
+      typeof record.text === "string"
+    ) {
+      parts.push(record.text);
+    }
+  }
+  return parts;
+}
+
+function makeUsageFromOpenAI(response: OpenAIResponse): Anthropic.Usage {
+  return {
+    input_tokens: response.usage?.input_tokens ?? 0,
+    output_tokens: response.usage?.output_tokens ?? 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation: null,
+    inference_geo: null,
+    server_tool_use: null,
+    service_tier: null,
+  } as Anthropic.Usage;
+}
+
+function convertOpenAIResponse(response: OpenAIResponse, model: string): Anthropic.Message {
+  const content: Anthropic.ContentBlock[] = [];
+
+  for (const item of response.output ?? []) {
+    if (item.type === "function_call") {
+      const callId =
+        typeof item.call_id === "string"
+          ? item.call_id
+          : typeof item.id === "string"
+            ? item.id
+            : randomUUID();
+      content.push({
+        type: "tool_use",
+        id: callId,
+        name: typeof item.name === "string" ? item.name : "unknown",
+        input: parseOpenAIArguments(item.arguments),
+        caller: { type: "direct" },
+      } as Anthropic.ToolUseBlock);
+      continue;
+    }
+
+    if (item.type === "message") {
+      for (const text of extractOpenAITextContent(item)) {
+        content.push({ type: "text", text, citations: null } as Anthropic.TextBlock);
+      }
+    }
+  }
+
+  if (content.length === 0 && typeof response.output_text === "string") {
+    content.push({
+      type: "text",
+      text: response.output_text,
+      citations: null,
+    } as Anthropic.TextBlock);
+  }
+
+  const stopReason: Anthropic.Message["stop_reason"] = content.some(
+    (block) => block.type === "tool_use",
+  )
+    ? "tool_use"
+    : response.status === "incomplete" &&
+        response.incomplete_details?.reason === "max_output_tokens"
+      ? "max_tokens"
+      : "end_turn";
+
+  return {
+    id: response.id ?? `resp_${randomUUID()}`,
+    type: "message",
+    role: "assistant",
+    model,
+    stop_reason: stopReason,
+    stop_sequence: null,
+    stop_details: null,
+    container: null,
+    content,
+    usage: makeUsageFromOpenAI(response),
+  } as Anthropic.Message;
+}
+
+export class OpenAIResponsesMessageClient implements MessageClient {
+  private readonly client: OpenAIResponsesClient;
+
+  constructor(client: OpenAIResponsesClient = new OpenAI()) {
+    this.client = client;
+  }
+
+  async create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message> {
+    const response = (await this.client.responses.create({
+      model: params.model,
+      instructions: stringifySystem(params.system),
+      input: convertMessagesToOpenAIInput(params.messages),
+      tools: convertToolsToOpenAI(params.tools as Anthropic.Tool[] | undefined),
+      max_output_tokens: params.max_tokens,
+      parallel_tool_calls: false,
+    } as unknown as OpenAI.Responses.ResponseCreateParamsNonStreaming)) as unknown as OpenAIResponse;
+
+    return convertOpenAIResponse(response, params.model);
+  }
 }
 
 export interface RunAgentOptions {
@@ -681,14 +927,14 @@ export async function runAgent(
   client?: MessageClient,
   options?: RunAgentOptions,
 ): Promise<RunAgentResult> {
-  const messagesClient: MessageClient = client ?? new Anthropic().messages;
+  const messagesClient: MessageClient = client ?? createDefaultMessageClient(config.provider);
   const logger = new Logger(config.log_events);
   const signalPaths = options?.signalPaths ?? getSignalPaths(cwd, config.signals);
   const subagentDepth = options?.subagentDepth ?? 0;
   const maxSubagentDepth = options?.maxSubagentDepth ?? 1;
 
   // R1: Configurable model per agent
-  const model = config.model ?? DEFAULT_MODEL;
+  const model = config.model ?? defaultModelForProvider(config.provider);
 
   // R3: Filter tools to match permissions; R2: cache_control applied inside filterTools.
   // Signal tool is always present, so tools is never empty.

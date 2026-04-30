@@ -3,6 +3,8 @@
 
 system_prompt: system_prompts/example.md   # Relative to .vesper/
 token_budget: 100000                       # Max tokens per run
+provider: anthropic                        # "anthropic" or "openai"
+# model: gpt-5.5                           # Optional; provider default when omitted
 max_tool_result_size: 50000                # Truncate tool results beyond this (bytes)
 log_denied_calls: false                    # Log when a tool call is denied
 log_events: false                          # Emit JSONL event stream to stderr

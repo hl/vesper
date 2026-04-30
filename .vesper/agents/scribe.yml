@@ -1,5 +1,6 @@
 system_prompt: system_prompts/scribe.md
 token_budget: 100000
+provider: anthropic
 log_denied_calls: false
 log_events: false
 skills: ".vesper/skills"

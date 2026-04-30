@@ -34,6 +34,9 @@ Then run:
 echo "Implement the auth module" | vesper run builder
 ```
 
+Set `ANTHROPIC_API_KEY` for the default Anthropic provider, or set
+`provider: openai` in the agent config and use `OPENAI_API_KEY` for OpenAI models.
+
 Or pass the task entirely as command-line arguments:
 
 ```sh
@@ -65,6 +68,8 @@ See the example config scaffolded by `vesper init` for all available keys with c
 Global agents at `~/.config/vesper/` follow the same layout. Local agents take priority.
 
 ## Concepts
+
+**Providers** — Agents default to Anthropic Claude via `provider: anthropic`, or can use OpenAI Responses API models such as `gpt-5.5` with `provider: openai`.
 
 **Tools** — Six file/command tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command` — each gated by glob patterns in the agent config. Optional `subagent` / `Task` dispatch is gated by exact agent names in `tools.subagents`. Plus a `signal` tool (always available) for explicit exit control.
 

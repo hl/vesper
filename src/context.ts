@@ -12,6 +12,9 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-opus-4": 200_000,
   "claude-haiku-4": 200_000,
   "claude-haiku-3": 200_000,
+  "gpt-5.5": 1_000_000,
+  "gpt-5-codex": 400_000,
+  "gpt-5.2-codex": 400_000,
 };
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
