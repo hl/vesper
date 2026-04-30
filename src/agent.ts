@@ -1323,7 +1323,7 @@ export async function runAgent(
 
   // Conversation complete — write signal based on recorded signal or default
   if (recordedSignal?.type === "complete") {
-    await writeComplete(signalPaths);
+    await writeComplete(signalPaths, agentName, finalText);
     logger.signalWrite("complete", signalPaths.complete);
   } else if (recordedSignal?.type === "needs_approval") {
     await writeAgentNeedsApproval(signalPaths, agentName, recordedSignal.message);
@@ -1338,7 +1338,7 @@ export async function runAgent(
     );
     logger.signalWrite("failed", signalPaths.failed);
   } else if (config.default_signal === "complete") {
-    await writeComplete(signalPaths);
+    await writeComplete(signalPaths, agentName, finalText);
     logger.signalWrite("complete", signalPaths.complete);
   }
   // else: default_signal is "none" and no signal recorded — no file written, brr continues

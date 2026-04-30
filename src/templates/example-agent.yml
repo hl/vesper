@@ -14,7 +14,7 @@ context_files:                             # Project files appended to system pr
   - CLAUDE.md
 
 signals:
-  complete: ".vesper-complete"             # Written on successful completion
+  complete: ".vesper-complete"             # Written on success; JSON when final output exists
   needs_approval: ".vesper-needs-approval" # Written when token budget exhausted
   failed: ".vesper-failed"                 # Written on failure
 

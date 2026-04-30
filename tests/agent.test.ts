@@ -205,7 +205,10 @@ describe("runAgent", () => {
     const result = await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
 
     expect(result.exitCode).toBe(0);
-    expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+    const payload = JSON.parse(readFileSync(join(tempDir, ".vesper-complete"), "utf-8"));
+    expect(payload.reason).toBe("complete");
+    expect(payload.agent).toBe("test-agent");
+    expect(payload.message).toBe("All done.");
   });
 
   // 2. Token budget exhaustion — single API call exceeds budget
@@ -1530,16 +1533,17 @@ describe("signal tool", () => {
     expect(payload.context).toBe("Dependency missing");
   });
 
-  it("writes complete by default when default_signal is complete and no signal called", async () => {
+  it("writes empty complete by default when default_signal is complete and no final text exists", async () => {
     const config = makeConfig({ default_signal: "complete" });
     const stubClient: MessageClient = {
-      create: async () => makeMessage({ stop_reason: "end_turn" }),
+      create: async () => makeMessage({ stop_reason: "end_turn", content: [] }),
     };
 
     writeFileSync(join(tempDir, "prompt.md"), "test");
     await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
 
     expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
+    expect(readFileSync(join(tempDir, ".vesper-complete"), "utf-8")).toBe("");
   });
 
   it("writes no signal file when default_signal is none and no signal called", async () => {
@@ -1819,7 +1823,7 @@ describe("signal tool", () => {
     expect(payload.context).toBeNull();
   });
 
-  it("signal(complete) with message silently ignores the message", async () => {
+  it("signal(complete) writes final assistant text to the complete signal", async () => {
     const config = makeConfig();
     let callCount = 0;
     const stubClient: MessageClient = {
@@ -1831,7 +1835,10 @@ describe("signal tool", () => {
             content: [makeToolUseBlock("signal", { type: "complete", message: "all done" })],
           });
         }
-        return makeMessage({ stop_reason: "end_turn" });
+        return makeMessage({
+          stop_reason: "end_turn",
+          content: [makeTextBlock("Finished after signal.")],
+        });
       },
     };
 
@@ -1839,7 +1846,8 @@ describe("signal tool", () => {
     await runAgent(config, "system", "task", tempDir, "test-agent", stubClient);
 
     expect(existsSync(join(tempDir, ".vesper-complete"))).toBe(true);
-    expect(readFileSync(join(tempDir, ".vesper-complete"), "utf-8")).toBe("");
+    const payload = JSON.parse(readFileSync(join(tempDir, ".vesper-complete"), "utf-8"));
+    expect(payload.message).toBe("Finished after signal.");
   });
 });
 

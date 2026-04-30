@@ -126,11 +126,22 @@ describe("signals", () => {
   });
 
   describe("writeComplete", () => {
-    it("writes complete signal as an empty file", async () => {
+    it("writes complete signal as an empty file when no message is provided", async () => {
       const paths = defaultSignals();
       await writeComplete(paths);
       expect(existsSync(paths.complete)).toBe(true);
       expect(readFileSync(paths.complete, "utf-8")).toBe("");
+    });
+
+    it("writes complete signal as JSON when final text is provided", async () => {
+      const paths = defaultSignals();
+      await writeComplete(paths, "coder", "All done.");
+
+      const content = JSON.parse(readFileSync(paths.complete, "utf-8"));
+      expect(content.reason).toBe("complete");
+      expect(content.agent).toBe("coder");
+      expect(content.message).toBe("All done.");
+      expect(content.context).toBe("All done.");
     });
   });
 

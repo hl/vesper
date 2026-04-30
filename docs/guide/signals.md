@@ -6,7 +6,20 @@ Signal files are how Vesper communicates outcomes to the parent process. After e
 
 ### `.vesper-complete`
 
-Written when the agent finishes successfully. Empty file.
+Written when the agent finishes successfully.
+
+When the agent has final text output, the complete signal contains JSON:
+
+```json
+{
+  "reason": "complete",
+  "agent": "builder",
+  "message": "Done.",
+  "context": "Done."
+}
+```
+
+If the agent finishes with no final text, the complete signal remains an empty file. This keeps file-existence based orchestrators compatible while preserving final output when available.
 
 ### `.vesper-needs-approval`
 

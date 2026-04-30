@@ -46,8 +46,23 @@ export function checkStaleSignals(paths: SignalPaths): string | null {
   return null;
 }
 
-export async function writeComplete(paths: SignalPaths): Promise<void> {
-  await Bun.write(paths.complete, "");
+export async function writeComplete(
+  paths: SignalPaths,
+  agent?: string,
+  message?: string | null,
+): Promise<void> {
+  if (agent === undefined || message === undefined || message === null || message.length === 0) {
+    await Bun.write(paths.complete, "");
+    return;
+  }
+
+  const payload = {
+    reason: "complete",
+    agent,
+    message,
+    context: message,
+  };
+  await Bun.write(paths.complete, JSON.stringify(payload, null, 2));
 }
 
 export async function writeNeedsApproval(

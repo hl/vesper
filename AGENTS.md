@@ -72,7 +72,7 @@ Core flow through source:
 3. Command permissions match binary name only, or binary + first arg — no deeper arg matching
 4. `max_tokens` truncation (stop_reason `"max_tokens"`) is a hard error, not a retry
 5. Token budget exhaustion writes `needs_approval`, not `failed`
-6. `writeComplete` and `writeFailed` accept a `SignalPaths` object
+6. `writeComplete` accepts `SignalPaths` plus optional final output; `writeFailed` accepts a `SignalPaths` object
 7. Token estimation uses chars/3 — a heuristic, not exact. The context guard fires at a configurable threshold (default 80%) to trigger pruning/compaction before hitting the model's hard limit
 8. Compaction truncation (`stop_reason: "max_tokens"`) is treated as a hard error, not a partial success
 9. Command permission entries must have at most 2 tokens (binary + optional subcommand) — config validation rejects longer entries

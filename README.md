@@ -83,7 +83,7 @@ Global agents at `~/.config/vesper/` follow the same layout. Local agents take p
 
 **Completion** — Agent exits when it stops calling tools or exhausts its token budget. `default_signal` controls what's written on exit (`complete` or nothing); agents can override by calling the `signal` tool.
 
-**Signals** — `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`. Configurable names. The binary refuses to start if stale signals exist.
+**Signals** — `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`. Configurable names. Complete signals include final output as JSON when available. The binary refuses to start if stale signals exist.
 
 ## Built-in Agents
 
