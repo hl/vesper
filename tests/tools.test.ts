@@ -279,6 +279,20 @@ describe("runCommand", () => {
     expect(result.stdout).toContain("[truncated:");
     expect(result.stderr).toContain("[truncated:");
   });
+
+  it("drains noisy commands while keeping only bounded output", async () => {
+    const script = [
+      'i=0; while [ "$i" -lt 200000 ]; do printf o; i=$((i + 1)); done',
+      'i=0; while [ "$i" -lt 200000 ]; do printf e >&2; i=$((i + 1)); done',
+    ].join("; ");
+
+    const result = await runCommand("sh", ["-c", script], tempDir, 5, [], 300);
+
+    expect(result.exit_code).toBe(0);
+    expect(Buffer.byteLength(JSON.stringify(result), "utf-8")).toBeLessThanOrEqual(300);
+    expect(result.stdout).toContain("[truncated:");
+    expect(result.stderr).toContain("[truncated:");
+  });
 });
 
 describe("truncateResult", () => {

@@ -522,6 +522,7 @@ async function executeSubagentTool(
   cwd: string,
   config: AgentConfig,
   client: MessageClient,
+  clientFactory: MessageClientFactory,
   subagentDepth: number,
   maxSubagentDepth: number,
 ): Promise<string> {
@@ -551,17 +552,20 @@ async function executeSubagentTool(
     const resolved = resolveAgent(request.agent, cwd);
     const subagentConfig = loadConfig(resolved.configPath);
     const systemPrompt = loadAgentSystemPrompt(subagentConfig, resolved.vesperDir, cwd);
+    const subagentClient =
+      subagentConfig.provider === config.provider ? client : clientFactory(subagentConfig.provider);
     const result = await runAgent(
       subagentConfig,
       systemPrompt,
       request.prompt,
       cwd,
       request.agent,
-      client,
+      subagentClient,
       {
         signalPaths,
         subagentDepth: subagentDepth + 1,
         maxSubagentDepth,
+        clientFactory,
       },
     );
     const { signal, payload } = readSubagentSignal(signalPaths);
@@ -694,6 +698,8 @@ interface OpenAIResponsesClient {
 function defaultModelForProvider(provider: AgentConfig["provider"]): string {
   return provider === "openai" ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
 }
+
+type MessageClientFactory = (provider: AgentConfig["provider"]) => MessageClient;
 
 function createDefaultMessageClient(provider: AgentConfig["provider"]): MessageClient {
   if (provider === "openai") {
@@ -916,6 +922,7 @@ export interface RunAgentOptions {
   signalPaths?: SignalPaths;
   subagentDepth?: number;
   maxSubagentDepth?: number;
+  clientFactory?: MessageClientFactory;
 }
 
 export async function runAgent(
@@ -927,7 +934,8 @@ export async function runAgent(
   client?: MessageClient,
   options?: RunAgentOptions,
 ): Promise<RunAgentResult> {
-  const messagesClient: MessageClient = client ?? createDefaultMessageClient(config.provider);
+  const clientFactory = options?.clientFactory ?? createDefaultMessageClient;
+  const messagesClient: MessageClient = client ?? clientFactory(config.provider);
   const logger = new Logger(config.log_events);
   const signalPaths = options?.signalPaths ?? getSignalPaths(cwd, config.signals);
   const subagentDepth = options?.subagentDepth ?? 0;
@@ -1234,6 +1242,7 @@ export async function runAgent(
             cwd,
             config,
             messagesClient,
+            clientFactory,
             subagentDepth,
             maxSubagentDepth,
           );

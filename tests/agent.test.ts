@@ -137,7 +137,7 @@ afterEach(() => {
 
 function writeTestAgentConfig(
   name: string,
-  options?: { systemPrompt?: string; tools?: string },
+  options?: { systemPrompt?: string; tools?: string; provider?: AgentConfig["provider"] },
 ): void {
   const agentsDir = join(tempDir, ".vesper", "agents");
   const promptsDir = join(tempDir, ".vesper", "system_prompts");
@@ -148,6 +148,7 @@ function writeTestAgentConfig(
     `
 system_prompt: system_prompts/${name}.md
 token_budget: 100000
+provider: ${options?.provider ?? "anthropic"}
 default_signal: complete
 tools:
 ${options?.tools ?? "  read: []\n  write: []\n  delete: []\n  commands: []"}
@@ -1219,6 +1220,69 @@ describe("sub-agent tool", () => {
     expect(parsed.agent).toBe("reviewer");
     expect(parsed.description).toBe("Review the change");
     expect(parsed.message).toBe("Task alias result.");
+  });
+
+  it("uses the sub-agent provider when it differs from the parent provider", async () => {
+    writeTestAgentConfig("reviewer", { provider: "anthropic" });
+    const config = makeConfig({
+      provider: "openai",
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["reviewer"] },
+    });
+
+    let parentCallCount = 0;
+    let subagentProvider: AgentConfig["provider"] | undefined;
+    let capturedSubagentParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    let capturedToolResult: string | undefined;
+
+    const parentClient: MessageClient = {
+      create: async (params) => {
+        parentCallCount++;
+        if (parentCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock(
+                "subagent",
+                { agent: "reviewer", prompt: "inspect the diff" },
+                "toolu_mixed_provider",
+              ),
+            ],
+          });
+        }
+
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          const toolResult = lastMsg.content[0] as Anthropic.ToolResultBlockParam;
+          capturedToolResult = toolResult.content as string;
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    const subagentClient: MessageClient = {
+      create: async (params) => {
+        capturedSubagentParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          content: [makeTextBlock("Anthropic sub-agent result.")],
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", parentClient, {
+      clientFactory: (provider) => {
+        subagentProvider = provider;
+        return subagentClient;
+      },
+    });
+
+    expect(parentCallCount).toBe(2);
+    expect(subagentProvider).toBe("anthropic");
+    expect(capturedSubagentParams?.model).toBe("claude-sonnet-4-6");
+    expect(capturedSubagentParams?.messages[0].content).toBe("inspect the diff");
+    const parsed = JSON.parse(capturedToolResult as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.message).toBe("Anthropic sub-agent result.");
   });
 
   it("denies sub-agent calls for agents outside tools.subagents", async () => {

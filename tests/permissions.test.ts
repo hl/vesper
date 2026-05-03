@@ -58,6 +58,16 @@ describe("checkPathPermission", () => {
     expect(checkPathPermission("deep/nested/file.ts", cwd, ["**"])).toBe(true);
   });
 
+  it("permits dotfiles with ** glob", () => {
+    writeFileSync(join(cwd, ".gitignore"), "");
+    expect(checkPathPermission(".gitignore", cwd, ["**"])).toBe(true);
+  });
+
+  it("permits dotfiles below matched directories", () => {
+    writeFileSync(join(cwd, "src", ".env"), "");
+    expect(checkPathPermission("src/.env", cwd, ["src/**"])).toBe(true);
+  });
+
   it("denies when allow list is empty", () => {
     expect(checkPathPermission("src/index.ts", cwd, [])).toBe(false);
   });

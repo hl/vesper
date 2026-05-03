@@ -64,7 +64,7 @@ export function checkPathPermission(inputPath: string, cwd: string, allowList: s
   }
 
   const rel = relative(realCwd, real);
-  return allowList.some((pattern) => minimatch(rel, pattern));
+  return allowList.some((pattern) => minimatch(rel, pattern, { dot: true }));
 }
 
 export function checkCommandPermission(

@@ -182,6 +182,44 @@ function buildCommandEnv(extraKeys: string[]): Record<string, string> {
   return env;
 }
 
+function truncateBufferResult(buffer: Buffer, totalBytes: number, limit: number): string {
+  if (totalBytes <= limit) return buffer.toString("utf-8");
+
+  const suffix = `\n[truncated: showing first ${limit} of ${totalBytes} bytes]`;
+  const suffixBytes = Buffer.byteLength(suffix, "utf-8");
+  if (suffixBytes >= limit) {
+    return buffer.subarray(0, limit).toString("utf-8");
+  }
+
+  const contentLimit = limit - suffixBytes;
+  return `${buffer.subarray(0, contentLimit).toString("utf-8")}${suffix}`;
+}
+
+async function readStreamPrefix(
+  stream: ReadableStream<Uint8Array>,
+  limit: number,
+): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Buffer[] = [];
+  let storedBytes = 0;
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    totalBytes += value.byteLength;
+    const remaining = limit - storedBytes;
+    if (remaining > 0) {
+      const kept = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      chunks.push(Buffer.from(kept));
+      storedBytes += kept.byteLength;
+    }
+  }
+
+  return truncateBufferResult(Buffer.concat(chunks, storedBytes), totalBytes, limit);
+}
+
 export async function runCommand(
   command: string,
   args: string[],
@@ -211,8 +249,8 @@ export async function runCommand(
     }, timeoutSeconds * 1000);
 
     const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+      readStreamPrefix(proc.stdout, maxResultSize),
+      readStreamPrefix(proc.stderr, maxResultSize),
     ]);
 
     await proc.exited;
