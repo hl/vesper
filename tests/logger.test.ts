@@ -14,13 +14,14 @@ describe("Logger", () => {
 
     logger.apiCall("claude-sonnet-4-20250514", 100, 200, 350);
     logger.toolCall("read", "src/main.ts", true, 12);
+    logger.subagentUsage("reviewer", 40, 10);
     logger.signalWrite("done", "/tmp/done.txt");
     logger.skillsLoaded(3, 4096, ["a.md", "b.md", "c.md"]);
 
     process.stderr.write = original;
 
     const lines = captured.trim().split("\n");
-    expect(lines.length).toBe(4);
+    expect(lines.length).toBe(5);
 
     for (const line of lines) {
       const parsed = JSON.parse(line);
@@ -47,12 +48,18 @@ describe("Logger", () => {
     expect(toolCallEvent.permitted).toBe(true);
     expect(toolCallEvent.duration_ms).toBe(12);
 
-    const signalEvent = JSON.parse(lines[2]);
+    const subagentUsageEvent = JSON.parse(lines[2]);
+    expect(subagentUsageEvent.event).toBe("subagent_usage");
+    expect(subagentUsageEvent.agent).toBe("reviewer");
+    expect(subagentUsageEvent.input_tokens).toBe(40);
+    expect(subagentUsageEvent.output_tokens).toBe(10);
+
+    const signalEvent = JSON.parse(lines[3]);
     expect(signalEvent.event).toBe("signal_write");
     expect(signalEvent.signal_type).toBe("done");
     expect(signalEvent.path).toBe("/tmp/done.txt");
 
-    const skillsEvent = JSON.parse(lines[3]);
+    const skillsEvent = JSON.parse(lines[4]);
     expect(skillsEvent.event).toBe("skills_loaded");
     expect(skillsEvent.file_count).toBe(3);
     expect(skillsEvent.total_bytes).toBe(4096);

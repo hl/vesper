@@ -5,6 +5,7 @@ system_prompt: system_prompts/example.md   # Relative to .vesper/
 token_budget: 100000                       # Max tokens per run
 provider: anthropic                        # "anthropic" or "openai"
 # model: gpt-5.5                           # Optional; provider default when omitted
+parallel_safe: false                       # Allows this child to run in parallel despite write/command access
 max_tool_result_size: 50000                # Truncate tool results beyond this (bytes)
 log_denied_calls: false                    # Log when a tool call is denied
 log_events: false                          # Emit JSONL event stream to stderr
@@ -24,6 +25,11 @@ signals:
 #   compaction_enabled: false               # Summarize conversation to free context
 #   compaction_threshold: 0.8               # Compact when context exceeds this % of window
 #   compaction_model: null                  # Model for compaction (null = use agent model)
+
+# subagents:
+#   parallel_same_turn: false               # Run same-turn subagent / Task calls concurrently
+#   max_concurrency: 4                      # Max concurrent child agents when enabled
+#   aggregate_token_budget: null            # Optional total child-token cap for one parent run
 
 tools:
   read:                                    # Glob patterns for read_file / list_files

@@ -18,9 +18,16 @@ export interface ContextManagementConfig {
   compaction_model: string | null;
 }
 
+export interface SubagentDispatchConfig {
+  parallel_same_turn: boolean;
+  max_concurrency: number;
+  aggregate_token_budget: number | null;
+}
+
 export interface AgentConfig {
   system_prompt: string;
   token_budget: number;
+  parallel_safe: boolean;
   log_denied_calls: boolean;
   provider: "anthropic" | "openai";
   model: string | undefined;
@@ -35,6 +42,7 @@ export interface AgentConfig {
   default_signal: "complete" | "none";
   signals: SignalConfig;
   context_management: ContextManagementConfig;
+  subagents: SubagentDispatchConfig;
   tools: {
     read: string[];
     write: string[];
@@ -125,6 +133,11 @@ export function loadConfig(configPath: string): AgentConfig {
   }
   if (parsed.token_budget <= 0) {
     throw new VesperError(`"token_budget" must be a positive number in ${configPath}`, 1);
+  }
+
+  const parallelSafe = parsed.parallel_safe ?? false;
+  if (typeof parallelSafe !== "boolean") {
+    throw new VesperError(`"parallel_safe" must be a boolean in ${configPath}`, 1);
   }
 
   // Required: tools
@@ -312,9 +325,58 @@ export function loadConfig(configPath: string): AgentConfig {
     throw new VesperError(`"context_management" must be a mapping in ${configPath}`, 1);
   }
 
+  const subagentsRaw = parsed.subagents;
+  let subagents: SubagentDispatchConfig;
+  if (subagentsRaw === undefined || subagentsRaw === null) {
+    subagents = {
+      parallel_same_turn: false,
+      max_concurrency: 4,
+      aggregate_token_budget: null,
+    };
+  } else if (isPlainObject(subagentsRaw)) {
+    const parallelSameTurn = subagentsRaw.parallel_same_turn ?? false;
+    if (typeof parallelSameTurn !== "boolean") {
+      throw new VesperError(`"subagents.parallel_same_turn" must be a boolean in ${configPath}`, 1);
+    }
+
+    const maxConcurrency = subagentsRaw.max_concurrency ?? 4;
+    if (
+      typeof maxConcurrency !== "number" ||
+      !Number.isInteger(maxConcurrency) ||
+      maxConcurrency <= 0
+    ) {
+      throw new VesperError(
+        `"subagents.max_concurrency" must be a positive integer in ${configPath}`,
+        1,
+      );
+    }
+
+    const aggregateTokenBudget = subagentsRaw.aggregate_token_budget ?? null;
+    if (
+      aggregateTokenBudget !== null &&
+      (typeof aggregateTokenBudget !== "number" ||
+        !Number.isInteger(aggregateTokenBudget) ||
+        aggregateTokenBudget <= 0)
+    ) {
+      throw new VesperError(
+        `"subagents.aggregate_token_budget" must be null or a positive integer in ${configPath}`,
+        1,
+      );
+    }
+
+    subagents = {
+      parallel_same_turn: parallelSameTurn,
+      max_concurrency: maxConcurrency,
+      aggregate_token_budget: aggregateTokenBudget,
+    };
+  } else {
+    throw new VesperError(`"subagents" must be a mapping in ${configPath}`, 1);
+  }
+
   return {
     system_prompt: parsed.system_prompt,
     token_budget: parsed.token_budget,
+    parallel_safe: parallelSafe,
     log_denied_calls:
       typeof parsed.log_denied_calls === "boolean" ? parsed.log_denied_calls : false,
     provider,
@@ -331,6 +393,7 @@ export function loadConfig(configPath: string): AgentConfig {
     context_files: contextFiles,
     signals,
     context_management: contextManagement,
+    subagents,
     tools: {
       read: toolRead,
       write: toolWrite,

@@ -43,6 +43,7 @@ tools:
 
 provider: anthropic               # "anthropic" or "openai" (default: anthropic)
 model: claude-sonnet-4-6          # Model ID (provider default when omitted)
+parallel_safe: false              # Child agent may run in parallel despite write/delete/command access
 command_timeout: 30                # Seconds before killing a command (default: 30)
 max_tool_result_size: 102400      # Truncate tool results beyond this many bytes (default: 100KB)
 log_denied_calls: false            # Log permission denials to stderr
@@ -68,6 +69,11 @@ context_management:
   compaction_enabled: false         # Enable conversation summarization
   compaction_threshold: 0.8        # Fraction of context window that triggers compaction
   compaction_model: null            # Model for summarization (defaults to agent's model)
+
+subagents:
+  parallel_same_turn: false         # Run same-turn subagent / Task calls concurrently
+  max_concurrency: 4                # Max concurrent child agents when enabled
+  aggregate_token_budget: null      # Optional total child-token cap for one parent invocation
 ```
 
 ## Key Details
@@ -79,6 +85,11 @@ context_management:
 **`commands`** entries must have at most 2 tokens (binary name, optionally a subcommand). Config validation rejects longer entries. `"git commit"` is valid; `"git commit -m"` is not.
 
 **`subagents`** entries are exact configured agent names. When non-empty, Vesper exposes the `subagent` tool plus a `Task` compatibility alias for prompts written for Claude Code-style sub-agent dispatch. The parent agent can only call the listed agents, and each sub-agent runs with its own config and permissions.
+
+**Top-level `subagents`** controls dispatch behavior, not permissions. By default same-turn
+sub-agent calls run sequentially. Set `subagents.parallel_same_turn: true` on the parent to run
+eligible child calls concurrently. A child is eligible when it has no write/delete/command access,
+or when its own config sets `parallel_safe: true`.
 
 **`provider`** selects the model API. `anthropic` uses the Anthropic Messages API and
 requires `ANTHROPIC_API_KEY`. `openai` uses the OpenAI Responses API and requires
@@ -114,8 +125,11 @@ Files that don't exist, are empty, or resolve outside cwd via symlinks are silen
 
 - `token_budget` must be a finite positive number
 - `provider` must be `anthropic` or `openai`
+- `parallel_safe` must be a boolean
 - `command_timeout` must be a finite positive number
 - `max_tool_result_size` must be a finite positive number
+- `subagents.max_concurrency` must be a positive integer
+- `subagents.aggregate_token_budget` must be null or a positive integer
 - Threshold values must be between 0 (exclusive) and 1 (inclusive)
 - All array fields must contain only strings
 - Agent names cannot contain `/`, `\`, or `..`

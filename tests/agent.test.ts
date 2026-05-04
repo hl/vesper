@@ -35,6 +35,7 @@ function makeConfig(overrides?: AgentConfigOverrides): AgentConfig {
   return {
     system_prompt: "test.md",
     token_budget: overrides?.token_budget ?? 100_000,
+    parallel_safe: overrides?.parallel_safe ?? false,
     log_denied_calls: overrides?.log_denied_calls ?? false,
     provider: overrides?.provider ?? "anthropic",
     model: overrides?.model,
@@ -58,6 +59,11 @@ function makeConfig(overrides?: AgentConfigOverrides): AgentConfig {
       compaction_enabled: false,
       compaction_threshold: 0.8,
       compaction_model: null,
+    },
+    subagents: overrides?.subagents ?? {
+      parallel_same_turn: false,
+      max_concurrency: 4,
+      aggregate_token_budget: null,
     },
     tools: {
       read: ["**"],
@@ -121,6 +127,10 @@ function makeToolUseBlock(
   } as Anthropic.ToolUseBlock;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -137,7 +147,12 @@ afterEach(() => {
 
 function writeTestAgentConfig(
   name: string,
-  options?: { systemPrompt?: string; tools?: string; provider?: AgentConfig["provider"] },
+  options?: {
+    systemPrompt?: string;
+    tools?: string;
+    provider?: AgentConfig["provider"];
+    parallelSafe?: boolean;
+  },
 ): void {
   const agentsDir = join(tempDir, ".vesper", "agents");
   const promptsDir = join(tempDir, ".vesper", "system_prompts");
@@ -149,6 +164,7 @@ function writeTestAgentConfig(
 system_prompt: system_prompts/${name}.md
 token_budget: 100000
 provider: ${options?.provider ?? "anthropic"}
+parallel_safe: ${options?.parallelSafe ?? false}
 default_signal: complete
 tools:
 ${options?.tools ?? "  read: []\n  write: []\n  delete: []\n  commands: []"}
@@ -1329,6 +1345,268 @@ describe("sub-agent tool", () => {
     expect(parsed.target).toBe("builder");
     expect(parsed.allowed_patterns).toEqual(["reviewer"]);
   });
+
+  it("runs same-turn sub-agent calls sequentially by default", async () => {
+    for (const name of ["a", "b"]) {
+      writeTestAgentConfig(name);
+    }
+    const config = makeConfig({
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["a", "b"] },
+    });
+
+    let activeChildren = 0;
+    let maxActiveChildren = 0;
+    let parentCallCount = 0;
+    const parentClient: MessageClient = {
+      create: async () => {
+        parentCallCount++;
+        if (parentCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("subagent", { agent: "a", prompt: "a" }, "toolu_a"),
+              makeToolUseBlock("subagent", { agent: "b", prompt: "b" }, "toolu_b"),
+            ],
+          });
+        }
+        if (parentCallCount <= 3) {
+          activeChildren++;
+          maxActiveChildren = Math.max(maxActiveChildren, activeChildren);
+          await delay(5);
+          activeChildren--;
+          return makeMessage({ stop_reason: "end_turn", content: [makeTextBlock("child")] });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", parentClient);
+
+    expect(parentCallCount).toBe(4);
+    expect(maxActiveChildren).toBe(1);
+  });
+
+  it("runs read-only same-turn sub-agent calls concurrently up to max_concurrency", async () => {
+    for (const name of ["a", "b", "c"]) {
+      writeTestAgentConfig(name);
+    }
+    const config = makeConfig({
+      subagents: {
+        parallel_same_turn: true,
+        max_concurrency: 2,
+        aggregate_token_budget: null,
+      },
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["a", "b", "c"] },
+    });
+
+    let activeChildren = 0;
+    let maxActiveChildren = 0;
+    let capturedToolResults: Anthropic.ToolResultBlockParam[] = [];
+    let parentCallCount = 0;
+    const parentClient: MessageClient = {
+      create: async (params) => {
+        parentCallCount++;
+        if (parentCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("subagent", { agent: "a", prompt: "a" }, "toolu_a"),
+              makeToolUseBlock("subagent", { agent: "b", prompt: "b" }, "toolu_b"),
+              makeToolUseBlock("subagent", { agent: "c", prompt: "c" }, "toolu_c"),
+            ],
+          });
+        }
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          capturedToolResults = lastMsg.content as Anthropic.ToolResultBlockParam[];
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    const childClient: MessageClient = {
+      create: async (params) => {
+        activeChildren++;
+        maxActiveChildren = Math.max(maxActiveChildren, activeChildren);
+        const prompt = params.messages[0].content;
+        await delay(prompt === "a" ? 20 : 5);
+        activeChildren--;
+        return makeMessage({ stop_reason: "end_turn", content: [makeTextBlock(String(prompt))] });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", parentClient, {
+      clientFactory: () => childClient,
+    });
+
+    expect(maxActiveChildren).toBe(2);
+    expect(capturedToolResults.map((result) => result.tool_use_id)).toEqual([
+      "toolu_a",
+      "toolu_b",
+      "toolu_c",
+    ]);
+    expect(JSON.parse(capturedToolResults[0].content as string).message).toBe("a");
+    expect(JSON.parse(capturedToolResults[1].content as string).message).toBe("b");
+    expect(JSON.parse(capturedToolResults[2].content as string).message).toBe("c");
+  });
+
+  it("runs unsafe children alone while preserving mixed-batch request order", async () => {
+    writeTestAgentConfig("a");
+    writeTestAgentConfig("b", {
+      tools: "  read: []\n  write:\n    - src/**\n  delete: []\n  commands: []",
+    });
+    writeTestAgentConfig("c");
+    const config = makeConfig({
+      subagents: {
+        parallel_same_turn: true,
+        max_concurrency: 2,
+        aggregate_token_budget: null,
+      },
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["a", "b", "c"] },
+    });
+
+    const events: string[] = [];
+    let parentCallCount = 0;
+    const parentClient: MessageClient = {
+      create: async () => {
+        parentCallCount++;
+        if (parentCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("subagent", { agent: "a", prompt: "a" }, "toolu_a"),
+              makeToolUseBlock("subagent", { agent: "b", prompt: "b" }, "toolu_b"),
+              makeToolUseBlock("subagent", { agent: "c", prompt: "c" }, "toolu_c"),
+            ],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    const childClient: MessageClient = {
+      create: async (params) => {
+        const prompt = String(params.messages[0].content);
+        events.push(`start:${prompt}`);
+        await delay(5);
+        events.push(`end:${prompt}`);
+        return makeMessage({ stop_reason: "end_turn", content: [makeTextBlock(prompt)] });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", parentClient, {
+      clientFactory: () => childClient,
+    });
+
+    expect(events).toEqual(["start:a", "end:a", "start:b", "end:b", "start:c", "end:c"]);
+  });
+
+  it("allows a parallel_safe write-capable child to overlap with siblings", async () => {
+    writeTestAgentConfig("a");
+    writeTestAgentConfig("b", {
+      parallelSafe: true,
+      tools: "  read: []\n  write:\n    - src/**\n  delete: []\n  commands: []",
+    });
+    const config = makeConfig({
+      subagents: {
+        parallel_same_turn: true,
+        max_concurrency: 2,
+        aggregate_token_budget: null,
+      },
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["a", "b"] },
+    });
+
+    let activeChildren = 0;
+    let maxActiveChildren = 0;
+    let parentCallCount = 0;
+    const parentClient: MessageClient = {
+      create: async () => {
+        parentCallCount++;
+        if (parentCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("subagent", { agent: "a", prompt: "a" }, "toolu_a"),
+              makeToolUseBlock("subagent", { agent: "b", prompt: "b" }, "toolu_b"),
+            ],
+          });
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+    const childClient: MessageClient = {
+      create: async () => {
+        activeChildren++;
+        maxActiveChildren = Math.max(maxActiveChildren, activeChildren);
+        await delay(10);
+        activeChildren--;
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", parentClient, {
+      clientFactory: () => childClient,
+    });
+
+    expect(maxActiveChildren).toBe(2);
+  });
+
+  it("blocks queued sub-agents when aggregate child token budget is exhausted", async () => {
+    writeTestAgentConfig("a");
+    writeTestAgentConfig("b");
+    const config = makeConfig({
+      subagents: {
+        parallel_same_turn: true,
+        max_concurrency: 1,
+        aggregate_token_budget: 100,
+      },
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["a", "b"] },
+    });
+
+    let parentCallCount = 0;
+    let capturedToolResults: Anthropic.ToolResultBlockParam[] = [];
+    const parentClient: MessageClient = {
+      create: async (params) => {
+        parentCallCount++;
+        if (parentCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("subagent", { agent: "a", prompt: "a" }, "toolu_a"),
+              makeToolUseBlock("subagent", { agent: "b", prompt: "b" }, "toolu_b"),
+            ],
+          });
+        }
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          capturedToolResults = lastMsg.content as Anthropic.ToolResultBlockParam[];
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+    const childClient: MessageClient = {
+      create: async () =>
+        makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 80, output_tokens: 30 },
+        }),
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", parentClient, {
+      clientFactory: () => childClient,
+    });
+
+    const first = JSON.parse(capturedToolResults[0].content as string);
+    const second = JSON.parse(capturedToolResults[1].content as string);
+    expect(first.ok).toBe(true);
+    expect(first.input_tokens).toBe(80);
+    expect(first.output_tokens).toBe(30);
+    expect(second.ok).toBe(false);
+    expect(second.signal).toBe("needs_approval");
+    expect(second.signal_payload.aggregate_token_budget).toBe(100);
+    expect(second.signal_payload.consumed_child_input_tokens).toBe(80);
+    expect(second.signal_payload.consumed_child_output_tokens).toBe(30);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1391,6 +1669,39 @@ describe("OpenAIResponsesMessageClient", () => {
     expect(toolUse.id).toBe("call_read");
     expect(toolUse.name).toBe("read_file");
     expect(toolUse.input).toEqual({ path: "src/index.ts" });
+  });
+
+  it("passes parallel tool call preference to OpenAI", async () => {
+    const capturedValues: unknown[] = [];
+    const client = new OpenAIResponsesMessageClient({
+      responses: {
+        create: async (params) => {
+          capturedValues.push((params as unknown as Record<string, unknown>).parallel_tool_calls);
+          return {
+            id: "resp_done",
+            status: "completed",
+            output_text: "Done.",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          };
+        },
+      },
+    });
+
+    await client.create({
+      model: "gpt-5.5",
+      max_tokens: 4096,
+      system: [{ type: "text", text: "System." }],
+      messages: [{ role: "user", content: "Hi" }],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+    await client.create({
+      model: "gpt-5.5",
+      max_tokens: 4096,
+      system: [{ type: "text", text: "System." }],
+      messages: [{ role: "user", content: "Hi" }],
+      parallelToolCalls: true,
+    } as Anthropic.MessageCreateParamsNonStreaming & { parallelToolCalls: boolean });
+
+    expect(capturedValues).toEqual([false, true]);
   });
 
   it("passes prior function calls and function call outputs back to OpenAI", async () => {

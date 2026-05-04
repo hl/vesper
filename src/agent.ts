@@ -525,6 +525,7 @@ async function executeSubagentTool(
   clientFactory: MessageClientFactory,
   subagentDepth: number,
   maxSubagentDepth: number,
+  useFreshClient = false,
 ): Promise<string> {
   const request = validateSubagentRequest(toolName, input);
   if ("error" in request) {
@@ -553,7 +554,9 @@ async function executeSubagentTool(
     const subagentConfig = loadConfig(resolved.configPath);
     const systemPrompt = loadAgentSystemPrompt(subagentConfig, resolved.vesperDir, cwd);
     const subagentClient =
-      subagentConfig.provider === config.provider ? client : clientFactory(subagentConfig.provider);
+      useFreshClient || subagentConfig.provider !== config.provider
+        ? clientFactory(subagentConfig.provider)
+        : client;
     const result = await runAgent(
       subagentConfig,
       systemPrompt,
@@ -578,6 +581,8 @@ async function executeSubagentTool(
       signal,
       message: result.finalText ?? null,
       signal_payload: payload,
+      input_tokens: result.inputTokens,
+      output_tokens: result.outputTokens,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -588,6 +593,59 @@ async function executeSubagentTool(
     });
   } finally {
     cleanupSubagentSignals(signalPaths);
+  }
+}
+
+function subagentTarget(toolUse: Anthropic.ToolUseBlock): string {
+  const inp = toolUse.input as Record<string, unknown>;
+  return typeof inp.agent === "string"
+    ? inp.agent
+    : typeof inp.subagent_type === "string"
+      ? inp.subagent_type
+      : toolUse.name;
+}
+
+function childCanRunInParallel(config: AgentConfig): boolean {
+  return (
+    config.parallel_safe ||
+    (config.tools.write.length === 0 &&
+      config.tools.delete.length === 0 &&
+      config.tools.commands.length === 0)
+  );
+}
+
+function isSubagentToolUse(toolUse: Anthropic.ToolUseBlock): boolean {
+  return toolUse.name === "subagent" || toolUse.name === "Task";
+}
+
+function parseToolResult(result: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(result);
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function isParallelEligibleSubagent(
+  toolUse: Anthropic.ToolUseBlock,
+  cwd: string,
+  config: AgentConfig,
+  subagentDepth: number,
+  maxSubagentDepth: number,
+): Promise<boolean> {
+  if (!config.subagents.parallel_same_turn) return false;
+  const request = validateSubagentRequest(toolUse.name, toolUse.input);
+  if ("error" in request) return false;
+  if (!config.tools.subagents.includes(request.agent)) return false;
+  if (subagentDepth >= maxSubagentDepth) return false;
+
+  try {
+    const resolved = resolveAgent(request.agent, cwd);
+    const subagentConfig = loadConfig(resolved.configPath);
+    return childCanRunInParallel(subagentConfig);
+  } catch {
+    return false;
   }
 }
 
@@ -670,11 +728,17 @@ export async function executeTool(
 export interface RunAgentResult {
   exitCode: number;
   finalText?: string | null;
+  inputTokens: number;
+  outputTokens: number;
 }
+
+type MessageCreateParams = Anthropic.MessageCreateParamsNonStreaming & {
+  parallelToolCalls?: boolean;
+};
 
 /** Internal Anthropic-shaped message interface, enabling test stubs and provider adapters. */
 export interface MessageClient {
-  create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message>;
+  create(params: MessageCreateParams): Promise<Anthropic.Message>;
 }
 
 type OpenAIResponse = {
@@ -701,11 +765,24 @@ function defaultModelForProvider(provider: AgentConfig["provider"]): string {
 
 type MessageClientFactory = (provider: AgentConfig["provider"]) => MessageClient;
 
+class AnthropicMessagesMessageClient implements MessageClient {
+  private readonly client: Anthropic.Messages;
+
+  constructor(client: Anthropic.Messages = new Anthropic().messages) {
+    this.client = client;
+  }
+
+  async create(params: MessageCreateParams): Promise<Anthropic.Message> {
+    const { parallelToolCalls: _parallelToolCalls, ...anthropicParams } = params;
+    return this.client.create(anthropicParams);
+  }
+}
+
 function createDefaultMessageClient(provider: AgentConfig["provider"]): MessageClient {
   if (provider === "openai") {
     return new OpenAIResponsesMessageClient();
   }
-  return new Anthropic().messages;
+  return new AnthropicMessagesMessageClient();
 }
 
 function stringifySystem(system: Anthropic.MessageCreateParamsNonStreaming["system"]): string {
@@ -904,14 +981,14 @@ export class OpenAIResponsesMessageClient implements MessageClient {
     this.client = client;
   }
 
-  async create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message> {
+  async create(params: MessageCreateParams): Promise<Anthropic.Message> {
     const response = (await this.client.responses.create({
       model: params.model,
       instructions: stringifySystem(params.system),
       input: convertMessagesToOpenAIInput(params.messages),
       tools: convertToolsToOpenAI(params.tools as Anthropic.Tool[] | undefined),
       max_output_tokens: params.max_tokens,
-      parallel_tool_calls: false,
+      parallel_tool_calls: params.parallelToolCalls === true,
     } as unknown as OpenAI.Responses.ResponseCreateParamsNonStreaming)) as unknown as OpenAIResponse;
 
     return convertOpenAIResponse(response, params.model);
@@ -955,6 +1032,12 @@ export async function runAgent(
 
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  const makeResult = (exitCode: number, finalTextResult?: string | null): RunAgentResult => ({
+    exitCode,
+    finalText: finalTextResult,
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+  });
 
   // Load skills
   const skillsContent = config.skills !== null ? loadSkills(config.skills, cwd, logger) : null;
@@ -1060,7 +1143,7 @@ export async function runAgent(
           `Conversation compaction failed: ${errMsg}`,
         );
         logger.signalWrite("failed", signalPaths.failed);
-        return { exitCode: 1 };
+        return makeResult(1);
       }
 
       // Check token budget after compaction (may trigger needs_approval).
@@ -1076,7 +1159,7 @@ export async function runAgent(
           null,
         );
         logger.signalWrite("needs_approval", signalPaths.needsApproval);
-        return { exitCode: 0 };
+        return makeResult(0);
       }
 
       // R5: Replace messages with single user message containing original task + summary
@@ -1104,7 +1187,7 @@ export async function runAgent(
           `Context still exceeds threshold after compaction (${estimatedContextTokens} tokens > ${Math.round(compactionLimit)} limit)`,
         );
         logger.signalWrite("needs_approval", signalPaths.needsApproval);
-        return { exitCode: 0 };
+        return makeResult(0);
       }
     }
 
@@ -1118,7 +1201,7 @@ export async function runAgent(
         `Estimated context size (${estimatedContextTokens} tokens) exceeds 95% of model window (${modelWindow} tokens)`,
       );
       logger.signalWrite("failed", signalPaths.failed);
-      return { exitCode: 1 };
+      return makeResult(1);
     }
 
     let response: Anthropic.Message;
@@ -1130,6 +1213,7 @@ export async function runAgent(
         system: systemBlocks,
         tools,
         messages,
+        parallelToolCalls: config.subagents.parallel_same_turn,
       });
     } catch (err) {
       if (isContextLengthError(err)) {
@@ -1140,12 +1224,12 @@ export async function runAgent(
           `Context window overflow: ${err.message}`,
         );
         logger.signalWrite("failed", signalPaths.failed);
-        return { exitCode: 1 };
+        return makeResult(1);
       }
       const message = err instanceof Error ? err.message : String(err);
       await writeFailed(signalPaths, agentName, "error", `API error: ${message}`);
       logger.signalWrite("failed", signalPaths.failed);
-      return { exitCode: 1 };
+      return makeResult(1);
     }
     const callLatency = Date.now() - callStart;
 
@@ -1172,7 +1256,7 @@ export async function runAgent(
         extractLastText(response),
       );
       logger.signalWrite("failed", signalPaths.failed);
-      return { exitCode: 1 };
+      return makeResult(1);
     }
 
     // Check token budget after each API call
@@ -1186,7 +1270,7 @@ export async function runAgent(
         extractLastText(response),
       );
       logger.signalWrite("needs_approval", signalPaths.needsApproval);
-      return { exitCode: 0 };
+      return makeResult(0);
     }
 
     // If no tool use, conversation is complete
@@ -1200,41 +1284,80 @@ export async function runAgent(
       (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
     );
 
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const toolUse of toolUseBlocks) {
-      // Intercept signal tool — records exit signal in local state, no I/O
-      if (toolUse.name === "signal") {
-        const input = toolUse.input as Record<string, unknown>;
-        const rawType = input.type;
-        if (rawType !== "complete" && rawType !== "needs_approval" && rawType !== "failed") {
-          const errContent = JSON.stringify({
-            error: "invalid_signal_type",
-            message: `Invalid signal type: ${String(rawType)}. Must be "complete", "needs_approval", or "failed".`,
-          });
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: errContent,
-          });
-          stubMetadata.set(toolUse.id, buildStubMetadata("signal", input, errContent));
-          continue;
-        }
-        const signalMessage = typeof input.message === "string" ? input.message : undefined;
-        recordedSignal = { type: rawType, message: signalMessage };
-        logger.toolCall("signal", rawType, true, 0);
-        const signalContent = JSON.stringify({ ok: true });
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: signalContent,
-        });
-        stubMetadata.set(toolUse.id, buildStubMetadata("signal", input, signalContent));
-        continue;
-      }
+    const toolResultsByIndex: Anthropic.ToolResultBlockParam[] = new Array(toolUseBlocks.length);
+    let childInputTokens = 0;
+    let childOutputTokens = 0;
 
-      if (toolUse.name === "subagent" || toolUse.name === "Task") {
-        const toolStart = Date.now();
-        let result: string;
+    const aggregateBudgetReached = (): boolean =>
+      config.subagents.aggregate_token_budget !== null &&
+      childInputTokens + childOutputTokens >= config.subagents.aggregate_token_budget;
+
+    const recordToolResult = (
+      index: number,
+      toolUse: Anthropic.ToolUseBlock,
+      content: string,
+      parsed: Record<string, unknown>,
+    ) => {
+      toolResultsByIndex[index] = {
+        type: "tool_result",
+        tool_use_id: toolUse.id,
+        content,
+      };
+      stubMetadata.set(
+        toolUse.id,
+        buildStubMetadata(toolUse.name, toolUse.input as Record<string, unknown>, content, parsed),
+      );
+    };
+
+    const executeSignalUse = (index: number, toolUse: Anthropic.ToolUseBlock) => {
+      const input = toolUse.input as Record<string, unknown>;
+      const rawType = input.type;
+      if (rawType !== "complete" && rawType !== "needs_approval" && rawType !== "failed") {
+        const errContent = JSON.stringify({
+          error: "invalid_signal_type",
+          message: `Invalid signal type: ${String(rawType)}. Must be "complete", "needs_approval", or "failed".`,
+        });
+        recordToolResult(index, toolUse, errContent, parseToolResult(errContent));
+        return;
+      }
+      const signalMessage = typeof input.message === "string" ? input.message : undefined;
+      recordedSignal = { type: rawType, message: signalMessage };
+      logger.toolCall("signal", rawType, true, 0);
+      const signalContent = JSON.stringify({ ok: true });
+      recordToolResult(index, toolUse, signalContent, parseToolResult(signalContent));
+    };
+
+    const blockedSubagentResult = (toolUse: Anthropic.ToolUseBlock): string =>
+      JSON.stringify({
+        ok: false,
+        agent: subagentTarget(toolUse),
+        description:
+          typeof (toolUse.input as Record<string, unknown>).description === "string"
+            ? (toolUse.input as Record<string, unknown>).description
+            : null,
+        exit_code: 0,
+        signal: "needs_approval",
+        message: "Aggregate sub-agent token budget exhausted before this child could start.",
+        signal_payload: {
+          reason: "subagent_aggregate_token_budget_exceeded",
+          aggregate_token_budget: config.subagents.aggregate_token_budget,
+          consumed_child_input_tokens: childInputTokens,
+          consumed_child_output_tokens: childOutputTokens,
+        },
+        input_tokens: 0,
+        output_tokens: 0,
+      });
+
+    const executeSubagentUse = async (
+      index: number,
+      toolUse: Anthropic.ToolUseBlock,
+      useFreshClient: boolean,
+    ) => {
+      const toolStart = Date.now();
+      let result: string;
+      if (aggregateBudgetReached()) {
+        result = blockedSubagentResult(toolUse);
+      } else {
         try {
           result = await executeSubagentTool(
             toolUse.name,
@@ -1245,32 +1368,36 @@ export async function runAgent(
             clientFactory,
             subagentDepth,
             maxSubagentDepth,
+            useFreshClient,
           );
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           result = JSON.stringify({ error: "internal_error", message: errMsg });
         }
-        const toolDuration = Date.now() - toolStart;
-        const parsed = JSON.parse(result) as Record<string, unknown>;
-        const permitted = parsed.error !== "permission_denied";
-        const inp = toolUse.input as Record<string, unknown>;
-        const target =
-          typeof inp.agent === "string"
-            ? inp.agent
-            : typeof inp.subagent_type === "string"
-              ? inp.subagent_type
-              : toolUse.name;
-        logger.toolCall(toolUse.name, target, permitted, toolDuration);
-
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: result,
-        });
-        stubMetadata.set(toolUse.id, buildStubMetadata(toolUse.name, inp, result, parsed));
-        continue;
       }
 
+      const toolDuration = Date.now() - toolStart;
+      const parsed = parseToolResult(result);
+      const permitted = parsed.error !== "permission_denied";
+      const target = subagentTarget(toolUse);
+      logger.toolCall(toolUse.name, target, permitted, toolDuration);
+
+      const inputTokens =
+        typeof parsed.input_tokens === "number" && Number.isFinite(parsed.input_tokens)
+          ? parsed.input_tokens
+          : 0;
+      const outputTokens =
+        typeof parsed.output_tokens === "number" && Number.isFinite(parsed.output_tokens)
+          ? parsed.output_tokens
+          : 0;
+      childInputTokens += inputTokens;
+      childOutputTokens += outputTokens;
+      logger.subagentUsage(target, inputTokens, outputTokens);
+
+      recordToolResult(index, toolUse, result, parsed);
+    };
+
+    const executeRegularToolUse = async (index: number, toolUse: Anthropic.ToolUseBlock) => {
       const toolStart = Date.now();
       let result: string;
       try {
@@ -1280,7 +1407,7 @@ export async function runAgent(
         result = JSON.stringify({ error: "internal_error", message: errMsg });
       }
       const toolDuration = Date.now() - toolStart;
-      const parsed = JSON.parse(result) as Record<string, unknown>;
+      const parsed = parseToolResult(result);
       const permitted = parsed.error !== "permission_denied";
       const inp = toolUse.input as Record<string, unknown>;
       const target =
@@ -1290,14 +1417,78 @@ export async function runAgent(
             ? inp.command
             : toolUse.name;
       logger.toolCall(toolUse.name, target, permitted, toolDuration);
+      recordToolResult(index, toolUse, result, parsed);
+    };
 
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: toolUse.id,
-        content: result,
-      });
-      stubMetadata.set(toolUse.id, buildStubMetadata(toolUse.name, inp, result, parsed));
+    const runParallelSubagentSegment = async (startIndex: number, endIndex: number) => {
+      let cursor = startIndex;
+      while (cursor < endIndex) {
+        const eligible = await isParallelEligibleSubagent(
+          toolUseBlocks[cursor],
+          cwd,
+          config,
+          subagentDepth,
+          maxSubagentDepth,
+        );
+        if (!eligible) {
+          await executeSubagentUse(cursor, toolUseBlocks[cursor], true);
+          cursor++;
+          continue;
+        }
+
+        const batch: Array<{ index: number; toolUse: Anthropic.ToolUseBlock }> = [];
+        while (cursor < endIndex && batch.length < config.subagents.max_concurrency) {
+          const batchEligible = await isParallelEligibleSubagent(
+            toolUseBlocks[cursor],
+            cwd,
+            config,
+            subagentDepth,
+            maxSubagentDepth,
+          );
+          if (!batchEligible) break;
+          batch.push({ index: cursor, toolUse: toolUseBlocks[cursor] });
+          cursor++;
+        }
+
+        await Promise.all(
+          batch.map(({ index, toolUse }) => executeSubagentUse(index, toolUse, true)),
+        );
+      }
+    };
+
+    let toolIndex = 0;
+    while (toolIndex < toolUseBlocks.length) {
+      const toolUse = toolUseBlocks[toolIndex];
+      if (toolUse.name === "signal") {
+        executeSignalUse(toolIndex, toolUse);
+        toolIndex++;
+        continue;
+      }
+
+      if (isSubagentToolUse(toolUse)) {
+        let endIndex = toolIndex + 1;
+        while (endIndex < toolUseBlocks.length && isSubagentToolUse(toolUseBlocks[endIndex])) {
+          endIndex++;
+        }
+
+        if (config.subagents.parallel_same_turn) {
+          await runParallelSubagentSegment(toolIndex, endIndex);
+        } else {
+          for (let i = toolIndex; i < endIndex; i++) {
+            await executeSubagentUse(i, toolUseBlocks[i], false);
+          }
+        }
+        toolIndex = endIndex;
+        continue;
+      }
+
+      await executeRegularToolUse(toolIndex, toolUse);
+      toolIndex++;
     }
+
+    const toolResults = toolResultsByIndex.filter(
+      (result): result is Anthropic.ToolResultBlockParam => result !== undefined,
+    );
 
     // Prune prior turn tool results before appending new turn
     const estimatedTokens = estimatePayloadTokens(systemBlocks, tools, [
@@ -1331,19 +1522,23 @@ export async function runAgent(
   }
 
   // Conversation complete — write signal based on recorded signal or default
-  if (recordedSignal?.type === "complete") {
+  const finalSignal = recordedSignal as {
+    type: "complete" | "needs_approval" | "failed";
+    message?: string;
+  } | null;
+  if (finalSignal?.type === "complete") {
     await writeComplete(signalPaths, agentName, finalText);
     logger.signalWrite("complete", signalPaths.complete);
-  } else if (recordedSignal?.type === "needs_approval") {
-    await writeAgentNeedsApproval(signalPaths, agentName, recordedSignal.message);
+  } else if (finalSignal?.type === "needs_approval") {
+    await writeAgentNeedsApproval(signalPaths, agentName, finalSignal.message);
     logger.signalWrite("needs_approval", signalPaths.needsApproval);
-  } else if (recordedSignal?.type === "failed") {
+  } else if (finalSignal?.type === "failed") {
     await writeFailed(
       signalPaths,
       agentName,
       "agent_failed",
-      recordedSignal.message ?? "Agent signaled failure",
-      recordedSignal.message,
+      finalSignal.message ?? "Agent signaled failure",
+      finalSignal.message,
     );
     logger.signalWrite("failed", signalPaths.failed);
   } else if (config.default_signal === "complete") {
@@ -1352,5 +1547,5 @@ export async function runAgent(
   }
   // else: default_signal is "none" and no signal recorded — no file written, brr continues
 
-  return { exitCode: 0, finalText };
+  return makeResult(0, finalText);
 }

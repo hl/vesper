@@ -137,6 +137,11 @@ describe("loadConfig", () => {
   const validYaml = `
 system_prompt: prompt.md
 token_budget: 100000
+parallel_safe: true
+subagents:
+  parallel_same_turn: true
+  max_concurrency: 2
+  aggregate_token_budget: 1000
 tools:
   read:
     - "src/**/*.ts"
@@ -161,8 +166,14 @@ tools: {}
 
     expect(config.system_prompt).toBe("prompt.md");
     expect(config.token_budget).toBe(100000);
+    expect(config.parallel_safe).toBe(true);
     expect(config.log_denied_calls).toBe(false);
     expect(config.provider).toBe("anthropic");
+    expect(config.subagents).toEqual({
+      parallel_same_turn: true,
+      max_concurrency: 2,
+      aggregate_token_budget: 1000,
+    });
     expect(config.tools.read).toEqual(["src/**/*.ts"]);
     expect(config.tools.write).toEqual(["src/**/*.ts"]);
     expect(config.tools.delete).toEqual([]);
@@ -176,8 +187,14 @@ tools: {}
 
     expect(config.system_prompt).toBe("prompt.md");
     expect(config.token_budget).toBe(50000);
+    expect(config.parallel_safe).toBe(false);
     expect(config.log_denied_calls).toBe(false);
     expect(config.provider).toBe("anthropic");
+    expect(config.subagents).toEqual({
+      parallel_same_turn: false,
+      max_concurrency: 4,
+      aggregate_token_budget: null,
+    });
     expect(config.tools.read).toEqual([]);
     expect(config.tools.write).toEqual([]);
     expect(config.tools.delete).toEqual([]);
@@ -210,6 +227,58 @@ tools: {}
     const path = writeYaml("log.yml", yaml);
     const config = loadConfig(path);
     expect(config.log_denied_calls).toBe(true);
+  });
+
+  it("rejects invalid parallel_safe value", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+parallel_safe: "yes"
+tools: {}
+`;
+    expect(() => loadConfig(writeYaml("bad-parallel-safe.yml", yaml))).toThrow(VesperError);
+  });
+
+  it("rejects invalid subagents config values", () => {
+    const cases = [
+      {
+        name: "bad-parallel-same-turn.yml",
+        body: "parallel_same_turn: yes",
+        message: "subagents.parallel_same_turn",
+      },
+      {
+        name: "bad-max-concurrency-zero.yml",
+        body: "max_concurrency: 0",
+        message: "subagents.max_concurrency",
+      },
+      {
+        name: "bad-max-concurrency-float.yml",
+        body: "max_concurrency: 1.5",
+        message: "subagents.max_concurrency",
+      },
+      {
+        name: "bad-aggregate-budget.yml",
+        body: "aggregate_token_budget: -1",
+        message: "subagents.aggregate_token_budget",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+subagents:
+  ${testCase.body}
+tools: {}
+`;
+      expect(() => loadConfig(writeYaml(testCase.name, yaml))).toThrow(VesperError);
+      try {
+        loadConfig(writeYaml(`again-${testCase.name}`, yaml));
+      } catch (e) {
+        expect(e).toBeInstanceOf(VesperError);
+        expect((e as VesperError).message).toContain(testCase.message);
+      }
+    }
   });
 
   it("bundled builder config permits its documented workflow", () => {

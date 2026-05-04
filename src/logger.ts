@@ -31,6 +31,14 @@ export class Logger {
     this.emit("tool_call", { tool, target, permitted, duration_ms: durationMs });
   }
 
+  subagentUsage(agent: string, inputTokens: number, outputTokens: number): void {
+    this.emit("subagent_usage", {
+      agent,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+    });
+  }
+
   signalWrite(signalType: string, path: string): void {
     this.emit("signal_write", { signal_type: signalType, path });
   }
