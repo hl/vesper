@@ -142,6 +142,12 @@ subagents:
   parallel_same_turn: true
   max_concurrency: 2
   aggregate_token_budget: 1000
+mcp_servers:
+  jira:
+    command: "bun"
+    args: ["jira-mcp.mjs"]
+    env: ["JIRA_TOKEN"]
+    allow_launch: true
 tools:
   read:
     - "src/**/*.ts"
@@ -152,6 +158,10 @@ tools:
     - "bun test"
   subagents:
     - "reviewer"
+  mcp_read:
+    - "jira.search"
+  mcp_write:
+    - "jira.comment"
 `;
 
   const minimalYaml = `
@@ -179,6 +189,14 @@ tools: {}
     expect(config.tools.delete).toEqual([]);
     expect(config.tools.commands).toEqual(["bun test"]);
     expect(config.tools.subagents).toEqual(["reviewer"]);
+    expect(config.mcp_servers.jira).toEqual({
+      command: "bun",
+      args: ["jira-mcp.mjs"],
+      env: ["JIRA_TOKEN"],
+      allow_launch: true,
+    });
+    expect(config.tools.mcp_read).toEqual(["jira.search"]);
+    expect(config.tools.mcp_write).toEqual(["jira.comment"]);
   });
 
   it("parses all optional keys with correct defaults when absent", () => {
@@ -200,6 +218,9 @@ tools: {}
     expect(config.tools.delete).toEqual([]);
     expect(config.tools.commands).toEqual([]);
     expect(config.tools.subagents).toEqual([]);
+    expect(config.tools.mcp_read).toEqual([]);
+    expect(config.tools.mcp_write).toEqual([]);
+    expect(config.mcp_servers).toEqual({});
   });
 
   it("silently ignores completion block in YAML for backward compatibility", () => {
@@ -279,6 +300,61 @@ tools: {}
         expect((e as VesperError).message).toContain(testCase.message);
       }
     }
+  });
+
+  it("rejects invalid MCP server config values", () => {
+    const cases = [
+      {
+        name: "bad-mcp-command.yml",
+        body: "args: []\n    env: []\n    allow_launch: true",
+        message: "mcp_servers.jira.command",
+      },
+      {
+        name: "bad-mcp-args.yml",
+        body: 'command: "bun"\n    args: "server.mjs"\n    env: []\n    allow_launch: true',
+        message: "mcp_servers.jira.args",
+      },
+      {
+        name: "bad-mcp-env.yml",
+        body: 'command: "bun"\n    args: []\n    env: "TOKEN"\n    allow_launch: true',
+        message: "mcp_servers.jira.env",
+      },
+      {
+        name: "bad-mcp-allow-launch.yml",
+        body: 'command: "bun"\n    args: []\n    env: []\n    allow_launch: false',
+        message: "mcp_servers.jira.allow_launch",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+mcp_servers:
+  jira:
+    ${testCase.body}
+tools: {}
+`;
+      expect(() => loadConfig(writeYaml(testCase.name, yaml))).toThrow(VesperError);
+      try {
+        loadConfig(writeYaml(`again-${testCase.name}`, yaml));
+      } catch (e) {
+        expect(e).toBeInstanceOf(VesperError);
+        expect((e as VesperError).message).toContain(testCase.message);
+      }
+    }
+  });
+
+  it("rejects invalid MCP grant arrays", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+tools:
+  mcp_read: "jira.search"
+  mcp_write:
+    - "jira.comment"
+`;
+    expect(() => loadConfig(writeYaml("bad-mcp-grants.yml", yaml))).toThrow(VesperError);
   });
 
   it("bundled builder config permits its documented workflow", () => {

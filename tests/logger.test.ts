@@ -15,13 +15,15 @@ describe("Logger", () => {
     logger.apiCall("claude-sonnet-4-20250514", 100, 200, 350);
     logger.toolCall("read", "src/main.ts", true, 12);
     logger.subagentUsage("reviewer", 40, 10);
+    logger.mcpServerStartup("jira", "bun", true, 25);
+    logger.mcpToolCall("jira", "search", true, 15, true);
     logger.signalWrite("done", "/tmp/done.txt");
     logger.skillsLoaded(3, 4096, ["a.md", "b.md", "c.md"]);
 
     process.stderr.write = original;
 
     const lines = captured.trim().split("\n");
-    expect(lines.length).toBe(5);
+    expect(lines.length).toBe(7);
 
     for (const line of lines) {
       const parsed = JSON.parse(line);
@@ -54,12 +56,27 @@ describe("Logger", () => {
     expect(subagentUsageEvent.input_tokens).toBe(40);
     expect(subagentUsageEvent.output_tokens).toBe(10);
 
-    const signalEvent = JSON.parse(lines[3]);
+    const mcpStartupEvent = JSON.parse(lines[3]);
+    expect(mcpStartupEvent.event).toBe("mcp_server_startup");
+    expect(mcpStartupEvent.server).toBe("jira");
+    expect(mcpStartupEvent.command).toBe("bun");
+    expect(mcpStartupEvent.success).toBe(true);
+    expect(mcpStartupEvent.duration_ms).toBe(25);
+
+    const mcpToolEvent = JSON.parse(lines[4]);
+    expect(mcpToolEvent.event).toBe("mcp_tool_call");
+    expect(mcpToolEvent.server).toBe("jira");
+    expect(mcpToolEvent.tool).toBe("search");
+    expect(mcpToolEvent.permitted).toBe(true);
+    expect(mcpToolEvent.success).toBe(true);
+    expect(mcpToolEvent.duration_ms).toBe(15);
+
+    const signalEvent = JSON.parse(lines[5]);
     expect(signalEvent.event).toBe("signal_write");
     expect(signalEvent.signal_type).toBe("done");
     expect(signalEvent.path).toBe("/tmp/done.txt");
 
-    const skillsEvent = JSON.parse(lines[4]);
+    const skillsEvent = JSON.parse(lines[6]);
     expect(skillsEvent.event).toBe("skills_loaded");
     expect(skillsEvent.file_count).toBe(3);
     expect(skillsEvent.total_bytes).toBe(4096);

@@ -39,6 +39,31 @@ export class Logger {
     });
   }
 
+  mcpServerStartup(server: string, command: string, success: boolean, durationMs: number): void {
+    this.emit("mcp_server_startup", {
+      server,
+      command,
+      success,
+      duration_ms: durationMs,
+    });
+  }
+
+  mcpToolCall(
+    server: string,
+    tool: string,
+    permitted: boolean,
+    durationMs: number,
+    success: boolean,
+  ): void {
+    this.emit("mcp_tool_call", {
+      server,
+      tool,
+      permitted,
+      success,
+      duration_ms: durationMs,
+    });
+  }
+
   signalWrite(signalType: string, path: string): void {
     this.emit("signal_write", { signal_type: signalType, path });
   }

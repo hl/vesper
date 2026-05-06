@@ -226,15 +226,29 @@ export function buildStubMetadata(
       const exitCode = typeof result.exit_code === "number" ? result.exit_code : 0;
       return { toolName, target, outcome: signal, size: `exit ${exitCode}` };
     }
-    default: {
-      const target =
-        typeof input.path === "string"
-          ? input.path
-          : typeof input.command === "string"
-            ? input.command
-            : toolName;
-      return { toolName, target, outcome: "ok" };
-    }
+    default:
+      if (toolName.startsWith("mcp__")) {
+        const server = typeof result.server === "string" ? result.server : "unknown";
+        const tool = typeof result.tool === "string" ? result.tool : toolName;
+        const target = `${server}.${tool}`;
+        const success = result.ok === true && result.is_error !== true;
+        const byteSize = Buffer.byteLength(resultString, "utf-8");
+        return {
+          toolName,
+          target,
+          outcome: success ? "ok" : parseOutcome(result),
+          size: formatSize(byteSize),
+        };
+      }
+      {
+        const target =
+          typeof input.path === "string"
+            ? input.path
+            : typeof input.command === "string"
+              ? input.command
+              : toolName;
+        return { toolName, target, outcome: "ok" };
+      }
   }
 }
 

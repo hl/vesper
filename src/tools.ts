@@ -171,7 +171,7 @@ export async function deleteFile(
   }
 }
 
-function buildCommandEnv(extraKeys: string[]): Record<string, string> {
+export function buildCommandEnv(extraKeys: string[]): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of [...DEFAULT_ENV_KEYS, ...extraKeys]) {
     const val = process.env[key];

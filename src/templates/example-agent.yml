@@ -31,6 +31,13 @@ signals:
 #   max_concurrency: 4                      # Max concurrent child agents when enabled
 #   aggregate_token_budget: null            # Optional total child-token cap for one parent run
 
+# mcp_servers:
+#   jira:
+#     command: "bun"                        # Local stdio MCP server executable
+#     args: ["jira-mcp.mjs"]                # Optional argv
+#     env: ["JIRA_TOKEN"]                   # Extra env vars passed to this server
+#     allow_launch: true                    # Required explicit launch acknowledgement
+
 tools:
   read:                                    # Glob patterns for read_file / list_files
     - "src/**"
@@ -43,3 +50,5 @@ tools:
     - "bun test"
     - "git commit"
   subagents: []                            # Allowed Vesper agent names for subagent / Task dispatch
+  mcp_read: []                             # Exact <server>.<tool> MCP read grants
+  mcp_write: []                            # Exact <server>.<tool> MCP mutation grants

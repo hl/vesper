@@ -65,12 +65,15 @@ function makeConfig(overrides?: AgentConfigOverrides): AgentConfig {
       max_concurrency: 4,
       aggregate_token_budget: null,
     },
+    mcp_servers: overrides?.mcp_servers ?? {},
     tools: {
       read: ["**"],
       write: ["**"],
       delete: ["**"],
       commands: [],
       subagents: [],
+      mcp_read: [],
+      mcp_write: [],
       ...(overrides?.tools ?? {}),
     },
   };
@@ -125,6 +128,86 @@ function makeToolUseBlock(
     input,
     caller: { type: "direct" },
   } as Anthropic.ToolUseBlock;
+}
+
+function writeMcpServerScript(options?: {
+  invalidSchema?: boolean;
+  ignoreInitialize?: boolean;
+}): string {
+  const scriptPath = join(tempDir, `mcp-server-${Math.random().toString(36).slice(2)}.mjs`);
+  const tools = options?.invalidSchema
+    ? `[{ name: "echo", description: "Echo", inputSchema: { type: "string" } }]`
+    : `[
+        {
+          name: "echo",
+          description: "Echo a message",
+          inputSchema: {
+            type: "object",
+            properties: { message: { type: "string" } },
+            required: ["message"],
+            additionalProperties: false
+          }
+        },
+        {
+          name: "fail",
+          description: "Return an MCP tool error",
+          inputSchema: { type: "object", properties: {}, additionalProperties: false }
+        },
+        {
+          name: "resource",
+          description: "Return resource-like content",
+          inputSchema: { type: "object", properties: {}, additionalProperties: false }
+        },
+        {
+          name: "protocol_error",
+          description: "Return a JSON-RPC error",
+          inputSchema: { type: "object", properties: {}, additionalProperties: false }
+        }
+      ]`;
+  writeFileSync(
+    scriptPath,
+    `
+import readline from "node:readline";
+
+const tools = ${tools};
+const ignoreInitialize = ${options?.ignoreInitialize === true ? "true" : "false"};
+const rl = readline.createInterface({ input: process.stdin });
+
+function send(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
+
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    if (ignoreInitialize) return;
+    send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "test", version: "1" } } });
+    return;
+  }
+  if (message.method === "tools/list") {
+    send({ jsonrpc: "2.0", id: message.id, result: { tools } });
+    return;
+  }
+  if (message.method === "tools/call") {
+    const name = message.params.name;
+    if (name === "protocol_error") {
+      send({ jsonrpc: "2.0", id: message.id, error: { code: 123, message: "Protocol boom" } });
+      return;
+    }
+    if (name === "fail") {
+      send({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "bad input" }], structuredContent: { failed: true }, isError: true } });
+      return;
+    }
+    if (name === "resource") {
+      send({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "resource_link", uri: "file:///tmp/a", name: "A" }, { type: "resource", resource: { uri: "file:///tmp/b", text: "B" } }], isError: false } });
+      return;
+    }
+    send({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: message.params.arguments.message }], structuredContent: { secret: process.env.MCP_SECRET ?? null, unlisted: process.env.MCP_UNLISTED ?? null }, isError: false } });
+  }
+});
+`,
+  );
+  return scriptPath;
 }
 
 function delay(ms: number): Promise<void> {
@@ -1606,6 +1689,286 @@ describe("sub-agent tool", () => {
     expect(second.signal_payload.aggregate_token_budget).toBe(100);
     expect(second.signal_payload.consumed_child_input_tokens).toBe(80);
     expect(second.signal_payload.consumed_child_output_tokens).toBe(30);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP runtime tools
+// ---------------------------------------------------------------------------
+
+describe("MCP runtime tools", () => {
+  it("exposes granted MCP tools, dispatches calls, filters env, and logs MCP events", async () => {
+    const serverPath = writeMcpServerScript();
+    process.env.MCP_SECRET = "allowed-secret";
+    process.env.MCP_UNLISTED = "hidden-secret";
+
+    const config = makeConfig({
+      log_events: true,
+      mcp_servers: {
+        echo: {
+          command: process.execPath,
+          args: [serverPath],
+          env: ["MCP_SECRET"],
+          allow_launch: true,
+        },
+      },
+      tools: {
+        read: [],
+        write: [],
+        delete: [],
+        commands: [],
+        mcp_read: ["echo.echo"],
+        mcp_write: [],
+      },
+    });
+
+    let capturedToolResults: Anthropic.ToolResultBlockParam[] = [];
+    let capturedTools: Anthropic.Tool[] = [];
+    let capturedLogs = "";
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk: string | Uint8Array) => {
+      capturedLogs += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      return true;
+    };
+
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          capturedTools = params.tools as Anthropic.Tool[];
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("mcp__echo__echo", { message: "hello from mcp" }, "toolu_mcp"),
+            ],
+          });
+        }
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          capturedToolResults = lastMsg.content as Anthropic.ToolResultBlockParam[];
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    try {
+      await runAgent(config, "system", "task", tempDir, "mcp-agent", stubClient);
+    } finally {
+      process.stderr.write = originalWrite;
+      delete process.env.MCP_SECRET;
+      delete process.env.MCP_UNLISTED;
+    }
+
+    expect(capturedTools.some((tool) => tool.name === "mcp__echo__echo")).toBe(true);
+    expect(capturedTools.some((tool) => tool.name === "mcp__echo__fail")).toBe(false);
+
+    const result = JSON.parse(capturedToolResults[0].content as string);
+    expect(result).toMatchObject({
+      ok: true,
+      server: "echo",
+      tool: "echo",
+      content: [{ type: "text", text: "hello from mcp" }],
+      structured_content: { secret: "allowed-secret", unlisted: null },
+      is_error: false,
+    });
+
+    const logEvents = capturedLogs
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line).event);
+    expect(logEvents).toContain("mcp_server_startup");
+    expect(logEvents).toContain("mcp_tool_call");
+  });
+
+  it("returns MCP tool errors, protocol errors, and resource content as tool results", async () => {
+    const serverPath = writeMcpServerScript();
+    const config = makeConfig({
+      mcp_servers: {
+        echo: {
+          command: process.execPath,
+          args: [serverPath],
+          env: [],
+          allow_launch: true,
+        },
+      },
+      tools: {
+        read: [],
+        write: [],
+        delete: [],
+        commands: [],
+        mcp_read: ["echo.fail", "echo.protocol_error", "echo.resource"],
+        mcp_write: [],
+      },
+    });
+
+    let capturedToolResults: Anthropic.ToolResultBlockParam[] = [];
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock("mcp__echo__fail", {}, "toolu_fail"),
+              makeToolUseBlock("mcp__echo__protocol_error", {}, "toolu_protocol"),
+              makeToolUseBlock("mcp__echo__resource", {}, "toolu_resource"),
+            ],
+          });
+        }
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          capturedToolResults = lastMsg.content as Anthropic.ToolResultBlockParam[];
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "mcp-agent", stubClient);
+
+    const toolError = JSON.parse(capturedToolResults[0].content as string);
+    expect(toolError.ok).toBe(false);
+    expect(toolError.is_error).toBe(true);
+    expect(toolError.structured_content).toEqual({ failed: true });
+
+    const protocolError = JSON.parse(capturedToolResults[1].content as string);
+    expect(protocolError).toMatchObject({
+      ok: false,
+      server: "echo",
+      tool: "protocol_error",
+      error: { code: 123, message: "Protocol boom" },
+      is_error: true,
+    });
+
+    const resourceResult = JSON.parse(capturedToolResults[2].content as string);
+    expect(resourceResult.ok).toBe(true);
+    expect(resourceResult.content[0]).toEqual({
+      type: "resource_link",
+      uri: "file:///tmp/a",
+      name: "A",
+    });
+    expect(resourceResult.content[1]).toEqual({
+      type: "resource",
+      resource: { uri: "file:///tmp/b", text: "B" },
+    });
+  });
+
+  it("returns revealable permission denial for ungranted normalized MCP calls", async () => {
+    const serverPath = writeMcpServerScript();
+    const config = makeConfig({
+      reveal_permissions: true,
+      mcp_servers: {
+        echo: {
+          command: process.execPath,
+          args: [serverPath],
+          env: [],
+          allow_launch: true,
+        },
+      },
+      tools: {
+        read: [],
+        write: [],
+        delete: [],
+        commands: [],
+        mcp_read: ["echo.echo"],
+        mcp_write: ["echo.fail"],
+      },
+    });
+
+    let capturedToolResults: Anthropic.ToolResultBlockParam[] = [];
+    let callCount = 0;
+    const stubClient: MessageClient = {
+      create: async (params) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [makeToolUseBlock("mcp__echo__missing", {}, "toolu_missing")],
+          });
+        }
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          capturedToolResults = lastMsg.content as Anthropic.ToolResultBlockParam[];
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "mcp-agent", stubClient);
+
+    const denial = JSON.parse(capturedToolResults[0].content as string);
+    expect(denial).toEqual({
+      error: "permission_denied",
+      tool: "mcp__echo__missing",
+      allowed_mcp_read: ["echo.echo"],
+      allowed_mcp_write: ["echo.fail"],
+    });
+  });
+
+  it("fails before the first model call for undefined MCP grants and bad schemas", async () => {
+    const invalidSchemaServerPath = writeMcpServerScript({ invalidSchema: true });
+    const cases: AgentConfig[] = [
+      makeConfig({
+        mcp_servers: {},
+        tools: { read: [], write: [], delete: [], commands: [], mcp_read: ["missing.echo"] },
+      }),
+      makeConfig({
+        mcp_servers: {
+          echo: {
+            command: process.execPath,
+            args: [invalidSchemaServerPath],
+            env: [],
+            allow_launch: true,
+          },
+        },
+        tools: { read: [], write: [], delete: [], commands: [], mcp_read: ["echo.echo"] },
+      }),
+    ];
+
+    for (const [index, config] of cases.entries()) {
+      const stubClient: MessageClient = {
+        create: async () => {
+          throw new Error("model should not be called");
+        },
+      };
+      const result = await runAgent(
+        config,
+        "system",
+        "task",
+        tempDir,
+        `mcp-fail-${index}`,
+        stubClient,
+      );
+      expect(result.exitCode).toBe(1);
+    }
+  });
+
+  it("fails before the first model call when MCP initialization times out", async () => {
+    const serverPath = writeMcpServerScript({ ignoreInitialize: true });
+    const config = makeConfig({
+      command_timeout: 0.05,
+      mcp_servers: {
+        echo: {
+          command: process.execPath,
+          args: [serverPath],
+          env: [],
+          allow_launch: true,
+        },
+      },
+      tools: { read: [], write: [], delete: [], commands: [], mcp_read: ["echo.echo"] },
+    });
+    const stubClient: MessageClient = {
+      create: async () => {
+        throw new Error("model should not be called");
+      },
+    };
+
+    const result = await runAgent(config, "system", "task", tempDir, "mcp-timeout", stubClient);
+
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(join(tempDir, ".vesper-failed"))).toBe(true);
   });
 });
 

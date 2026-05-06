@@ -71,7 +71,7 @@ Global agents at `~/.config/vesper/` follow the same layout. Local agents take p
 
 **Providers** — Agents default to Anthropic Claude via `provider: anthropic`, or can use OpenAI Responses API models such as `gpt-5.5` with `provider: openai`.
 
-**Tools** — Six file/command tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command` — each gated by glob patterns in the agent config. Optional `subagent` / `Task` dispatch is gated by exact agent names in `tools.subagents`; same-turn child calls can run concurrently with opt-in `subagents.parallel_same_turn`. Plus a `signal` tool (always available) for explicit exit control.
+**Tools** — Six file/command tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command` — each gated by glob patterns in the agent config. Optional `subagent` / `Task` dispatch is gated by exact agent names in `tools.subagents`; same-turn child calls can run concurrently with opt-in `subagents.parallel_same_turn`. Optional local stdio MCP tools are gated by exact `tools.mcp_read` / `tools.mcp_write` grants and exposed as `mcp__<server>__<tool>`. Plus a `signal` tool (always available) for explicit exit control.
 
 **Permissions** — Allow-list only. File paths are resolved through symlinks via `realpathSync`. Commands match binary name, optionally with first argument. Agents with no permissions for a tool category never see that tool in the API call.
 

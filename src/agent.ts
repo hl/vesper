@@ -15,6 +15,12 @@ import {
 import { VesperError } from "./errors.js";
 import { Logger } from "./logger.js";
 import {
+  isMcpToolName,
+  type McpPreparedRuntime,
+  mcpPermissionDeniedResponse,
+  prepareMcpRuntime,
+} from "./mcp.js";
+import {
   checkCommandPermission,
   checkPathPermission,
   isContained,
@@ -325,6 +331,7 @@ function filterTools(
   config: AgentConfig,
   subagentDepth = 0,
   maxSubagentDepth = 1,
+  mcpTools: Anthropic.Tool[] = [],
 ): Anthropic.Tool[] {
   const toolPermissionMap: Record<string, string[]> = {
     read_file: config.tools.read,
@@ -343,6 +350,8 @@ function filterTools(
     const list = toolPermissionMap[tool.name];
     return list !== undefined && list.length > 0;
   });
+  // MCP tools are already permission-filtered during MCP startup/listing.
+  filtered.push(...mcpTools);
   // Signal tool is always available — append after permission filtering
   filtered.push(SIGNAL_TOOL_DEFINITION);
   // R2: Apply cache_control to the last tool definition for prompt caching
@@ -1017,13 +1026,28 @@ export async function runAgent(
   const signalPaths = options?.signalPaths ?? getSignalPaths(cwd, config.signals);
   const subagentDepth = options?.subagentDepth ?? 0;
   const maxSubagentDepth = options?.maxSubagentDepth ?? 1;
+  let mcpRuntime: McpPreparedRuntime | null = null;
 
   // R1: Configurable model per agent
   const model = config.model ?? defaultModelForProvider(config.provider);
 
+  try {
+    mcpRuntime = await prepareMcpRuntime(config, cwd, logger);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await writeFailed(signalPaths, agentName, "error", `MCP startup failed: ${message}`);
+    logger.signalWrite("failed", signalPaths.failed);
+    return {
+      exitCode: 1,
+      finalText: null,
+      inputTokens: 0,
+      outputTokens: 0,
+    };
+  }
+
   // R3: Filter tools to match permissions; R2: cache_control applied inside filterTools.
   // Signal tool is always present, so tools is never empty.
-  const tools = filterTools(config, subagentDepth, maxSubagentDepth);
+  const tools = filterTools(config, subagentDepth, maxSubagentDepth, mcpRuntime?.tools ?? []);
 
   // R2: System prompt as structured content block with cache_control
   const systemBlocks: Anthropic.TextBlockParam[] = [
@@ -1093,459 +1117,481 @@ export async function runAgent(
   const contextLimit = 0.95 * modelWindow;
   const compactionLimit = compactionThreshold * modelWindow;
 
-  // Tool loop — model calls tools until it stops
-  while (true) {
-    // Pre-call context guard: estimate context and fail gracefully at 95% of model window
-    let estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
-    if (compactionEnabled && !compactionAttempted && estimatedContextTokens > compactionLimit) {
-      compactionAttempted = true;
-      const beforeTokens = estimatedContextTokens;
+  try {
+    // Tool loop — model calls tools until it stops
+    while (true) {
+      // Pre-call context guard: estimate context and fail gracefully at 95% of model window
+      let estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
+      if (compactionEnabled && !compactionAttempted && estimatedContextTokens > compactionLimit) {
+        compactionAttempted = true;
+        const beforeTokens = estimatedContextTokens;
 
-      const writeScratchpad = async (summary: string) => {
-        if (config.scratchpad === null) return;
-        try {
-          let realCwd: string;
+        const writeScratchpad = async (summary: string) => {
+          if (config.scratchpad === null) return;
           try {
-            realCwd = realpathSync(cwd);
+            let realCwd: string;
+            try {
+              realCwd = realpathSync(cwd);
+            } catch {
+              realCwd = cwd;
+            }
+            const scratchpadPath = resolve(realCwd, config.scratchpad);
+            if (!isContained(scratchpadPath, realCwd)) return;
+            const real = resolveReal(config.scratchpad, realCwd);
+            if (real !== null && !isContained(real, realCwd)) return;
+            await Bun.write(scratchpadPath, summary);
           } catch {
-            realCwd = cwd;
+            // Best-effort: scratchpad write failure should not derail compaction
           }
-          const scratchpadPath = resolve(realCwd, config.scratchpad);
-          if (!isContained(scratchpadPath, realCwd)) return;
-          const real = resolveReal(config.scratchpad, realCwd);
-          if (real !== null && !isContained(real, realCwd)) return;
-          await Bun.write(scratchpadPath, summary);
-        } catch {
-          // Best-effort: scratchpad write failure should not derail compaction
+        };
+
+        let summary: string;
+        try {
+          const { summary: s, usage: compactionUsage } = await compactConversation(
+            messagesClient,
+            compactionModel,
+            messages,
+            userContent,
+          );
+          summary = s;
+
+          // R8: Count compaction usage against token budget
+          totalInputTokens += compactionUsage.input_tokens;
+          totalOutputTokens += compactionUsage.output_tokens;
+        } catch (err) {
+          // R9: Compaction failure writes failed signal
+          const errMsg = err instanceof Error ? err.message : String(err);
+          await writeFailed(
+            signalPaths,
+            agentName,
+            "error",
+            `Conversation compaction failed: ${errMsg}`,
+          );
+          logger.signalWrite("failed", signalPaths.failed);
+          return makeResult(1);
         }
-      };
 
-      let summary: string;
-      try {
-        const { summary: s, usage: compactionUsage } = await compactConversation(
-          messagesClient,
-          compactionModel,
-          messages,
-          userContent,
-        );
-        summary = s;
+        // Check token budget after compaction (may trigger needs_approval).
+        // Write scratchpad first so the summary survives for the next invocation.
+        if (totalInputTokens + totalOutputTokens >= config.token_budget) {
+          await writeScratchpad(summary);
+          await writeNeedsApproval(
+            signalPaths,
+            agentName,
+            config.token_budget,
+            totalInputTokens,
+            totalOutputTokens,
+            null,
+          );
+          logger.signalWrite("needs_approval", signalPaths.needsApproval);
+          return makeResult(0);
+        }
 
-        // R8: Count compaction usage against token budget
-        totalInputTokens += compactionUsage.input_tokens;
-        totalOutputTokens += compactionUsage.output_tokens;
-      } catch (err) {
-        // R9: Compaction failure writes failed signal
-        const errMsg = err instanceof Error ? err.message : String(err);
+        // R5: Replace messages with single user message containing original task + summary
+        messages = [
+          {
+            role: "user",
+            content: `[Original Task]\n${userContent}\n\n[Conversation Summary]\n${summary}`,
+          },
+        ];
+
+        // Clear stale stub metadata — old tool_use_ids no longer exist in messages
+        stubMetadata.clear();
+
+        // Re-estimate after compaction
+        estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
+
+        logger.contextCompacted(beforeTokens, estimatedContextTokens);
+
+        // R14: If still over compaction threshold after compaction, write scratchpad + needs_approval
+        if (estimatedContextTokens > compactionLimit) {
+          await writeScratchpad(summary);
+          await writeAgentNeedsApproval(
+            signalPaths,
+            agentName,
+            `Context still exceeds threshold after compaction (${estimatedContextTokens} tokens > ${Math.round(compactionLimit)} limit)`,
+          );
+          logger.signalWrite("needs_approval", signalPaths.needsApproval);
+          return makeResult(0);
+        }
+      }
+
+      // Pre-call guard: if still over 95%, fail (compaction either not enabled, already attempted, or succeeded but context still high)
+      if (estimatedContextTokens > contextLimit) {
+        logger.contextGuardTriggered(estimatedContextTokens, modelWindow);
         await writeFailed(
           signalPaths,
           agentName,
           "error",
-          `Conversation compaction failed: ${errMsg}`,
+          `Estimated context size (${estimatedContextTokens} tokens) exceeds 95% of model window (${modelWindow} tokens)`,
         );
         logger.signalWrite("failed", signalPaths.failed);
         return makeResult(1);
       }
 
-      // Check token budget after compaction (may trigger needs_approval).
-      // Write scratchpad first so the summary survives for the next invocation.
+      let response: Anthropic.Message;
+      const callStart = Date.now();
+      try {
+        response = await messagesClient.create({
+          model,
+          max_tokens: MAX_OUTPUT_TOKENS,
+          system: systemBlocks,
+          tools,
+          messages,
+          parallelToolCalls: config.subagents.parallel_same_turn,
+        });
+      } catch (err) {
+        if (isContextLengthError(err)) {
+          await writeFailed(
+            signalPaths,
+            agentName,
+            "error",
+            `Context window overflow: ${err.message}`,
+          );
+          logger.signalWrite("failed", signalPaths.failed);
+          return makeResult(1);
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        await writeFailed(signalPaths, agentName, "error", `API error: ${message}`);
+        logger.signalWrite("failed", signalPaths.failed);
+        return makeResult(1);
+      }
+      const callLatency = Date.now() - callStart;
+
+      // Track usage after each API call
+      totalInputTokens += response.usage.input_tokens;
+      totalOutputTokens += response.usage.output_tokens;
+      logger.apiCall(model, response.usage.input_tokens, response.usage.output_tokens, callLatency);
+
+      // Post-call estimation drift detection: warn when heuristic diverges >30% from actual.
+      if (response.usage.input_tokens > 0) {
+        const ratio = estimatedContextTokens / response.usage.input_tokens;
+        if (ratio > 1.3 || ratio < 0.7) {
+          logger.contextEstimationDrift(estimatedContextTokens, response.usage.input_tokens, ratio);
+        }
+      }
+
+      // Treat max_tokens truncation as a hard error (checked before budget)
+      if (response.stop_reason === "max_tokens") {
+        await writeFailed(
+          signalPaths,
+          agentName,
+          "error",
+          "Response truncated: stop_reason was 'max_tokens'. The model's output exceeded the per-call limit.",
+          extractLastText(response),
+        );
+        logger.signalWrite("failed", signalPaths.failed);
+        return makeResult(1);
+      }
+
+      // Check token budget after each API call
       if (totalInputTokens + totalOutputTokens >= config.token_budget) {
-        await writeScratchpad(summary);
         await writeNeedsApproval(
           signalPaths,
           agentName,
           config.token_budget,
           totalInputTokens,
           totalOutputTokens,
-          null,
+          extractLastText(response),
         );
         logger.signalWrite("needs_approval", signalPaths.needsApproval);
         return makeResult(0);
       }
 
-      // R5: Replace messages with single user message containing original task + summary
-      messages = [
-        {
-          role: "user",
-          content: `[Original Task]\n${userContent}\n\n[Conversation Summary]\n${summary}`,
-        },
-      ];
-
-      // Clear stale stub metadata — old tool_use_ids no longer exist in messages
-      stubMetadata.clear();
-
-      // Re-estimate after compaction
-      estimatedContextTokens = fixedCostTokens + estimatePayloadTokens([], [], messages);
-
-      logger.contextCompacted(beforeTokens, estimatedContextTokens);
-
-      // R14: If still over compaction threshold after compaction, write scratchpad + needs_approval
-      if (estimatedContextTokens > compactionLimit) {
-        await writeScratchpad(summary);
-        await writeAgentNeedsApproval(
-          signalPaths,
-          agentName,
-          `Context still exceeds threshold after compaction (${estimatedContextTokens} tokens > ${Math.round(compactionLimit)} limit)`,
-        );
-        logger.signalWrite("needs_approval", signalPaths.needsApproval);
-        return makeResult(0);
+      // If no tool use, conversation is complete
+      if (response.stop_reason !== "tool_use") {
+        finalText = extractLastText(response);
+        break;
       }
-    }
 
-    // Pre-call guard: if still over 95%, fail (compaction either not enabled, already attempted, or succeeded but context still high)
-    if (estimatedContextTokens > contextLimit) {
-      logger.contextGuardTriggered(estimatedContextTokens, modelWindow);
-      await writeFailed(
-        signalPaths,
-        agentName,
-        "error",
-        `Estimated context size (${estimatedContextTokens} tokens) exceeds 95% of model window (${modelWindow} tokens)`,
+      // Extract and execute tool calls
+      const toolUseBlocks = response.content.filter(
+        (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
       );
-      logger.signalWrite("failed", signalPaths.failed);
-      return makeResult(1);
-    }
 
-    let response: Anthropic.Message;
-    const callStart = Date.now();
-    try {
-      response = await messagesClient.create({
-        model,
-        max_tokens: MAX_OUTPUT_TOKENS,
-        system: systemBlocks,
-        tools,
-        messages,
-        parallelToolCalls: config.subagents.parallel_same_turn,
-      });
-    } catch (err) {
-      if (isContextLengthError(err)) {
-        await writeFailed(
-          signalPaths,
-          agentName,
-          "error",
-          `Context window overflow: ${err.message}`,
-        );
-        logger.signalWrite("failed", signalPaths.failed);
-        return makeResult(1);
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      await writeFailed(signalPaths, agentName, "error", `API error: ${message}`);
-      logger.signalWrite("failed", signalPaths.failed);
-      return makeResult(1);
-    }
-    const callLatency = Date.now() - callStart;
+      const toolResultsByIndex: Anthropic.ToolResultBlockParam[] = new Array(toolUseBlocks.length);
+      let childInputTokens = 0;
+      let childOutputTokens = 0;
 
-    // Track usage after each API call
-    totalInputTokens += response.usage.input_tokens;
-    totalOutputTokens += response.usage.output_tokens;
-    logger.apiCall(model, response.usage.input_tokens, response.usage.output_tokens, callLatency);
+      const aggregateBudgetReached = (): boolean =>
+        config.subagents.aggregate_token_budget !== null &&
+        childInputTokens + childOutputTokens >= config.subagents.aggregate_token_budget;
 
-    // Post-call estimation drift detection: warn when heuristic diverges >30% from actual.
-    if (response.usage.input_tokens > 0) {
-      const ratio = estimatedContextTokens / response.usage.input_tokens;
-      if (ratio > 1.3 || ratio < 0.7) {
-        logger.contextEstimationDrift(estimatedContextTokens, response.usage.input_tokens, ratio);
-      }
-    }
-
-    // Treat max_tokens truncation as a hard error (checked before budget)
-    if (response.stop_reason === "max_tokens") {
-      await writeFailed(
-        signalPaths,
-        agentName,
-        "error",
-        "Response truncated: stop_reason was 'max_tokens'. The model's output exceeded the per-call limit.",
-        extractLastText(response),
-      );
-      logger.signalWrite("failed", signalPaths.failed);
-      return makeResult(1);
-    }
-
-    // Check token budget after each API call
-    if (totalInputTokens + totalOutputTokens >= config.token_budget) {
-      await writeNeedsApproval(
-        signalPaths,
-        agentName,
-        config.token_budget,
-        totalInputTokens,
-        totalOutputTokens,
-        extractLastText(response),
-      );
-      logger.signalWrite("needs_approval", signalPaths.needsApproval);
-      return makeResult(0);
-    }
-
-    // If no tool use, conversation is complete
-    if (response.stop_reason !== "tool_use") {
-      finalText = extractLastText(response);
-      break;
-    }
-
-    // Extract and execute tool calls
-    const toolUseBlocks = response.content.filter(
-      (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
-    );
-
-    const toolResultsByIndex: Anthropic.ToolResultBlockParam[] = new Array(toolUseBlocks.length);
-    let childInputTokens = 0;
-    let childOutputTokens = 0;
-
-    const aggregateBudgetReached = (): boolean =>
-      config.subagents.aggregate_token_budget !== null &&
-      childInputTokens + childOutputTokens >= config.subagents.aggregate_token_budget;
-
-    const recordToolResult = (
-      index: number,
-      toolUse: Anthropic.ToolUseBlock,
-      content: string,
-      parsed: Record<string, unknown>,
-    ) => {
-      toolResultsByIndex[index] = {
-        type: "tool_result",
-        tool_use_id: toolUse.id,
-        content,
-      };
-      stubMetadata.set(
-        toolUse.id,
-        buildStubMetadata(toolUse.name, toolUse.input as Record<string, unknown>, content, parsed),
-      );
-    };
-
-    const executeSignalUse = (index: number, toolUse: Anthropic.ToolUseBlock) => {
-      const input = toolUse.input as Record<string, unknown>;
-      const rawType = input.type;
-      if (rawType !== "complete" && rawType !== "needs_approval" && rawType !== "failed") {
-        const errContent = JSON.stringify({
-          error: "invalid_signal_type",
-          message: `Invalid signal type: ${String(rawType)}. Must be "complete", "needs_approval", or "failed".`,
-        });
-        recordToolResult(index, toolUse, errContent, parseToolResult(errContent));
-        return;
-      }
-      const signalMessage = typeof input.message === "string" ? input.message : undefined;
-      recordedSignal = { type: rawType, message: signalMessage };
-      logger.toolCall("signal", rawType, true, 0);
-      const signalContent = JSON.stringify({ ok: true });
-      recordToolResult(index, toolUse, signalContent, parseToolResult(signalContent));
-    };
-
-    const blockedSubagentResult = (toolUse: Anthropic.ToolUseBlock): string =>
-      JSON.stringify({
-        ok: false,
-        agent: subagentTarget(toolUse),
-        description:
-          typeof (toolUse.input as Record<string, unknown>).description === "string"
-            ? (toolUse.input as Record<string, unknown>).description
-            : null,
-        exit_code: 0,
-        signal: "needs_approval",
-        message: "Aggregate sub-agent token budget exhausted before this child could start.",
-        signal_payload: {
-          reason: "subagent_aggregate_token_budget_exceeded",
-          aggregate_token_budget: config.subagents.aggregate_token_budget,
-          consumed_child_input_tokens: childInputTokens,
-          consumed_child_output_tokens: childOutputTokens,
-        },
-        input_tokens: 0,
-        output_tokens: 0,
-      });
-
-    const executeSubagentUse = async (
-      index: number,
-      toolUse: Anthropic.ToolUseBlock,
-      useFreshClient: boolean,
-    ) => {
-      const toolStart = Date.now();
-      let result: string;
-      if (aggregateBudgetReached()) {
-        result = blockedSubagentResult(toolUse);
-      } else {
-        try {
-          result = await executeSubagentTool(
+      const recordToolResult = (
+        index: number,
+        toolUse: Anthropic.ToolUseBlock,
+        content: string,
+        parsed: Record<string, unknown>,
+      ) => {
+        toolResultsByIndex[index] = {
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content,
+        };
+        stubMetadata.set(
+          toolUse.id,
+          buildStubMetadata(
             toolUse.name,
-            toolUse.input,
-            cwd,
-            config,
-            messagesClient,
-            clientFactory,
-            subagentDepth,
-            maxSubagentDepth,
-            useFreshClient,
-          );
+            toolUse.input as Record<string, unknown>,
+            content,
+            parsed,
+          ),
+        );
+      };
+
+      const executeSignalUse = (index: number, toolUse: Anthropic.ToolUseBlock) => {
+        const input = toolUse.input as Record<string, unknown>;
+        const rawType = input.type;
+        if (rawType !== "complete" && rawType !== "needs_approval" && rawType !== "failed") {
+          const errContent = JSON.stringify({
+            error: "invalid_signal_type",
+            message: `Invalid signal type: ${String(rawType)}. Must be "complete", "needs_approval", or "failed".`,
+          });
+          recordToolResult(index, toolUse, errContent, parseToolResult(errContent));
+          return;
+        }
+        const signalMessage = typeof input.message === "string" ? input.message : undefined;
+        recordedSignal = { type: rawType, message: signalMessage };
+        logger.toolCall("signal", rawType, true, 0);
+        const signalContent = JSON.stringify({ ok: true });
+        recordToolResult(index, toolUse, signalContent, parseToolResult(signalContent));
+      };
+
+      const blockedSubagentResult = (toolUse: Anthropic.ToolUseBlock): string =>
+        JSON.stringify({
+          ok: false,
+          agent: subagentTarget(toolUse),
+          description:
+            typeof (toolUse.input as Record<string, unknown>).description === "string"
+              ? (toolUse.input as Record<string, unknown>).description
+              : null,
+          exit_code: 0,
+          signal: "needs_approval",
+          message: "Aggregate sub-agent token budget exhausted before this child could start.",
+          signal_payload: {
+            reason: "subagent_aggregate_token_budget_exceeded",
+            aggregate_token_budget: config.subagents.aggregate_token_budget,
+            consumed_child_input_tokens: childInputTokens,
+            consumed_child_output_tokens: childOutputTokens,
+          },
+          input_tokens: 0,
+          output_tokens: 0,
+        });
+
+      const executeSubagentUse = async (
+        index: number,
+        toolUse: Anthropic.ToolUseBlock,
+        useFreshClient: boolean,
+      ) => {
+        const toolStart = Date.now();
+        let result: string;
+        if (aggregateBudgetReached()) {
+          result = blockedSubagentResult(toolUse);
+        } else {
+          try {
+            result = await executeSubagentTool(
+              toolUse.name,
+              toolUse.input,
+              cwd,
+              config,
+              messagesClient,
+              clientFactory,
+              subagentDepth,
+              maxSubagentDepth,
+              useFreshClient,
+            );
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            result = JSON.stringify({ error: "internal_error", message: errMsg });
+          }
+        }
+
+        const toolDuration = Date.now() - toolStart;
+        const parsed = parseToolResult(result);
+        const permitted = parsed.error !== "permission_denied";
+        const target = subagentTarget(toolUse);
+        logger.toolCall(toolUse.name, target, permitted, toolDuration);
+
+        const inputTokens =
+          typeof parsed.input_tokens === "number" && Number.isFinite(parsed.input_tokens)
+            ? parsed.input_tokens
+            : 0;
+        const outputTokens =
+          typeof parsed.output_tokens === "number" && Number.isFinite(parsed.output_tokens)
+            ? parsed.output_tokens
+            : 0;
+        childInputTokens += inputTokens;
+        childOutputTokens += outputTokens;
+        logger.subagentUsage(target, inputTokens, outputTokens);
+
+        recordToolResult(index, toolUse, result, parsed);
+      };
+
+      const executeRegularToolUse = async (index: number, toolUse: Anthropic.ToolUseBlock) => {
+        const toolStart = Date.now();
+        let result: string;
+        try {
+          if (isMcpToolName(toolUse.name)) {
+            result =
+              mcpRuntime === null || !mcpRuntime.toolMap.has(toolUse.name)
+                ? mcpPermissionDeniedResponse(config, toolUse.name)
+                : await mcpRuntime.execute(toolUse.name, toolUse.input);
+          } else {
+            result = await executeTool(toolUse.name, toolUse.input, cwd, config);
+          }
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           result = JSON.stringify({ error: "internal_error", message: errMsg });
         }
-      }
-
-      const toolDuration = Date.now() - toolStart;
-      const parsed = parseToolResult(result);
-      const permitted = parsed.error !== "permission_denied";
-      const target = subagentTarget(toolUse);
-      logger.toolCall(toolUse.name, target, permitted, toolDuration);
-
-      const inputTokens =
-        typeof parsed.input_tokens === "number" && Number.isFinite(parsed.input_tokens)
-          ? parsed.input_tokens
-          : 0;
-      const outputTokens =
-        typeof parsed.output_tokens === "number" && Number.isFinite(parsed.output_tokens)
-          ? parsed.output_tokens
-          : 0;
-      childInputTokens += inputTokens;
-      childOutputTokens += outputTokens;
-      logger.subagentUsage(target, inputTokens, outputTokens);
-
-      recordToolResult(index, toolUse, result, parsed);
-    };
-
-    const executeRegularToolUse = async (index: number, toolUse: Anthropic.ToolUseBlock) => {
-      const toolStart = Date.now();
-      let result: string;
-      try {
-        result = await executeTool(toolUse.name, toolUse.input, cwd, config);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        result = JSON.stringify({ error: "internal_error", message: errMsg });
-      }
-      const toolDuration = Date.now() - toolStart;
-      const parsed = parseToolResult(result);
-      const permitted = parsed.error !== "permission_denied";
-      const inp = toolUse.input as Record<string, unknown>;
-      const target =
-        typeof inp.path === "string"
-          ? inp.path
-          : typeof inp.command === "string"
-            ? inp.command
-            : toolUse.name;
-      logger.toolCall(toolUse.name, target, permitted, toolDuration);
-      recordToolResult(index, toolUse, result, parsed);
-    };
-
-    const runParallelSubagentSegment = async (startIndex: number, endIndex: number) => {
-      let cursor = startIndex;
-      while (cursor < endIndex) {
-        const eligible = await isParallelEligibleSubagent(
-          toolUseBlocks[cursor],
-          cwd,
-          config,
-          subagentDepth,
-          maxSubagentDepth,
-        );
-        if (!eligible) {
-          await executeSubagentUse(cursor, toolUseBlocks[cursor], true);
-          cursor++;
-          continue;
+        const toolDuration = Date.now() - toolStart;
+        const parsed = parseToolResult(result);
+        const permitted = parsed.error !== "permission_denied";
+        const inp = toolUse.input as Record<string, unknown>;
+        const target = isMcpToolName(toolUse.name)
+          ? toolUse.name
+          : typeof inp.path === "string"
+            ? inp.path
+            : typeof inp.command === "string"
+              ? inp.command
+              : toolUse.name;
+        if (isMcpToolName(toolUse.name)) {
+          const server = typeof parsed.server === "string" ? parsed.server : "unknown";
+          const tool = typeof parsed.tool === "string" ? parsed.tool : toolUse.name;
+          logger.mcpToolCall(server, tool, permitted, toolDuration, parsed.ok !== false);
         }
+        logger.toolCall(toolUse.name, target, permitted, toolDuration);
+        recordToolResult(index, toolUse, result, parsed);
+      };
 
-        const batch: Array<{ index: number; toolUse: Anthropic.ToolUseBlock }> = [];
-        while (cursor < endIndex && batch.length < config.subagents.max_concurrency) {
-          const batchEligible = await isParallelEligibleSubagent(
+      const runParallelSubagentSegment = async (startIndex: number, endIndex: number) => {
+        let cursor = startIndex;
+        while (cursor < endIndex) {
+          const eligible = await isParallelEligibleSubagent(
             toolUseBlocks[cursor],
             cwd,
             config,
             subagentDepth,
             maxSubagentDepth,
           );
-          if (!batchEligible) break;
-          batch.push({ index: cursor, toolUse: toolUseBlocks[cursor] });
-          cursor++;
-        }
-
-        await Promise.all(
-          batch.map(({ index, toolUse }) => executeSubagentUse(index, toolUse, true)),
-        );
-      }
-    };
-
-    let toolIndex = 0;
-    while (toolIndex < toolUseBlocks.length) {
-      const toolUse = toolUseBlocks[toolIndex];
-      if (toolUse.name === "signal") {
-        executeSignalUse(toolIndex, toolUse);
-        toolIndex++;
-        continue;
-      }
-
-      if (isSubagentToolUse(toolUse)) {
-        let endIndex = toolIndex + 1;
-        while (endIndex < toolUseBlocks.length && isSubagentToolUse(toolUseBlocks[endIndex])) {
-          endIndex++;
-        }
-
-        if (config.subagents.parallel_same_turn) {
-          await runParallelSubagentSegment(toolIndex, endIndex);
-        } else {
-          for (let i = toolIndex; i < endIndex; i++) {
-            await executeSubagentUse(i, toolUseBlocks[i], false);
+          if (!eligible) {
+            await executeSubagentUse(cursor, toolUseBlocks[cursor], true);
+            cursor++;
+            continue;
           }
+
+          const batch: Array<{ index: number; toolUse: Anthropic.ToolUseBlock }> = [];
+          while (cursor < endIndex && batch.length < config.subagents.max_concurrency) {
+            const batchEligible = await isParallelEligibleSubagent(
+              toolUseBlocks[cursor],
+              cwd,
+              config,
+              subagentDepth,
+              maxSubagentDepth,
+            );
+            if (!batchEligible) break;
+            batch.push({ index: cursor, toolUse: toolUseBlocks[cursor] });
+            cursor++;
+          }
+
+          await Promise.all(
+            batch.map(({ index, toolUse }) => executeSubagentUse(index, toolUse, true)),
+          );
         }
-        toolIndex = endIndex;
-        continue;
+      };
+
+      let toolIndex = 0;
+      while (toolIndex < toolUseBlocks.length) {
+        const toolUse = toolUseBlocks[toolIndex];
+        if (toolUse.name === "signal") {
+          executeSignalUse(toolIndex, toolUse);
+          toolIndex++;
+          continue;
+        }
+
+        if (isSubagentToolUse(toolUse)) {
+          let endIndex = toolIndex + 1;
+          while (endIndex < toolUseBlocks.length && isSubagentToolUse(toolUseBlocks[endIndex])) {
+            endIndex++;
+          }
+
+          if (config.subagents.parallel_same_turn) {
+            await runParallelSubagentSegment(toolIndex, endIndex);
+          } else {
+            for (let i = toolIndex; i < endIndex; i++) {
+              await executeSubagentUse(i, toolUseBlocks[i], false);
+            }
+          }
+          toolIndex = endIndex;
+          continue;
+        }
+
+        await executeRegularToolUse(toolIndex, toolUse);
+        toolIndex++;
       }
 
-      await executeRegularToolUse(toolIndex, toolUse);
-      toolIndex++;
-    }
+      const toolResults = toolResultsByIndex.filter(
+        (result): result is Anthropic.ToolResultBlockParam => result !== undefined,
+      );
 
-    const toolResults = toolResultsByIndex.filter(
-      (result): result is Anthropic.ToolResultBlockParam => result !== undefined,
-    );
-
-    // Prune prior turn tool results before appending new turn
-    const estimatedTokens = estimatePayloadTokens(systemBlocks, tools, [
-      ...messages,
-      { role: "assistant", content: response.content },
-      { role: "user", content: toolResults },
-    ]);
-    const { messages: prunedMessages, prunedCount } = pruneMessages(
-      messages,
-      stubMetadata,
-      config.context_management.pruning,
-      estimatedTokens,
-      config.context_management.pruning_threshold,
-      modelWindow,
-    );
-    if (prunedCount > 0) {
-      const afterTokens = estimatePayloadTokens(systemBlocks, tools, [
-        ...prunedMessages,
+      // Prune prior turn tool results before appending new turn
+      const estimatedTokens = estimatePayloadTokens(systemBlocks, tools, [
+        ...messages,
         { role: "assistant", content: response.content },
         { role: "user", content: toolResults },
       ]);
-      logger.contextPruned(prunedCount, estimatedTokens - afterTokens);
+      const { messages: prunedMessages, prunedCount } = pruneMessages(
+        messages,
+        stubMetadata,
+        config.context_management.pruning,
+        estimatedTokens,
+        config.context_management.pruning_threshold,
+        modelWindow,
+      );
+      if (prunedCount > 0) {
+        const afterTokens = estimatePayloadTokens(systemBlocks, tools, [
+          ...prunedMessages,
+          { role: "assistant", content: response.content },
+          { role: "user", content: toolResults },
+        ]);
+        logger.contextPruned(prunedCount, estimatedTokens - afterTokens);
+      }
+
+      // Append assistant response and tool results for next round
+      messages = [
+        ...prunedMessages,
+        { role: "assistant", content: response.content },
+        { role: "user", content: toolResults },
+      ];
     }
 
-    // Append assistant response and tool results for next round
-    messages = [
-      ...prunedMessages,
-      { role: "assistant", content: response.content },
-      { role: "user", content: toolResults },
-    ];
-  }
+    // Conversation complete — write signal based on recorded signal or default
+    const finalSignal = recordedSignal as {
+      type: "complete" | "needs_approval" | "failed";
+      message?: string;
+    } | null;
+    if (finalSignal?.type === "complete") {
+      await writeComplete(signalPaths, agentName, finalText);
+      logger.signalWrite("complete", signalPaths.complete);
+    } else if (finalSignal?.type === "needs_approval") {
+      await writeAgentNeedsApproval(signalPaths, agentName, finalSignal.message);
+      logger.signalWrite("needs_approval", signalPaths.needsApproval);
+    } else if (finalSignal?.type === "failed") {
+      await writeFailed(
+        signalPaths,
+        agentName,
+        "agent_failed",
+        finalSignal.message ?? "Agent signaled failure",
+        finalSignal.message,
+      );
+      logger.signalWrite("failed", signalPaths.failed);
+    } else if (config.default_signal === "complete") {
+      await writeComplete(signalPaths, agentName, finalText);
+      logger.signalWrite("complete", signalPaths.complete);
+    }
+    // else: default_signal is "none" and no signal recorded — no file written, brr continues
 
-  // Conversation complete — write signal based on recorded signal or default
-  const finalSignal = recordedSignal as {
-    type: "complete" | "needs_approval" | "failed";
-    message?: string;
-  } | null;
-  if (finalSignal?.type === "complete") {
-    await writeComplete(signalPaths, agentName, finalText);
-    logger.signalWrite("complete", signalPaths.complete);
-  } else if (finalSignal?.type === "needs_approval") {
-    await writeAgentNeedsApproval(signalPaths, agentName, finalSignal.message);
-    logger.signalWrite("needs_approval", signalPaths.needsApproval);
-  } else if (finalSignal?.type === "failed") {
-    await writeFailed(
-      signalPaths,
-      agentName,
-      "agent_failed",
-      finalSignal.message ?? "Agent signaled failure",
-      finalSignal.message,
-    );
-    logger.signalWrite("failed", signalPaths.failed);
-  } else if (config.default_signal === "complete") {
-    await writeComplete(signalPaths, agentName, finalText);
-    logger.signalWrite("complete", signalPaths.complete);
+    return makeResult(0, finalText);
+  } finally {
+    await mcpRuntime?.close();
   }
-  // else: default_signal is "none" and no signal recorded — no file written, brr continues
-
-  return makeResult(0, finalText);
 }

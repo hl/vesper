@@ -24,6 +24,13 @@ export interface SubagentDispatchConfig {
   aggregate_token_budget: number | null;
 }
 
+export interface McpServerConfig {
+  command: string;
+  args: string[];
+  env: string[];
+  allow_launch: true;
+}
+
 export interface AgentConfig {
   system_prompt: string;
   token_budget: number;
@@ -43,12 +50,15 @@ export interface AgentConfig {
   signals: SignalConfig;
   context_management: ContextManagementConfig;
   subagents: SubagentDispatchConfig;
+  mcp_servers: Record<string, McpServerConfig>;
   tools: {
     read: string[];
     write: string[];
     delete: string[];
     commands: string[];
     subagents: string[];
+    mcp_read: string[];
+    mcp_write: string[];
   };
 }
 
@@ -153,12 +163,16 @@ export function loadConfig(configPath: string): AgentConfig {
   const toolDelete = tools.delete ?? [];
   const toolCommands = tools.commands ?? [];
   const toolSubagents = tools.subagents ?? [];
+  const toolMcpRead = tools.mcp_read ?? [];
+  const toolMcpWrite = tools.mcp_write ?? [];
 
   assertStringArray(toolRead, "tools.read");
   assertStringArray(toolWrite, "tools.write");
   assertStringArray(toolDelete, "tools.delete");
   assertStringArray(toolCommands, "tools.commands");
   assertStringArray(toolSubagents, "tools.subagents");
+  assertStringArray(toolMcpRead, "tools.mcp_read");
+  assertStringArray(toolMcpWrite, "tools.mcp_write");
 
   for (const entry of toolCommands as string[]) {
     const parts = entry.trim().split(/\s+/);
@@ -373,6 +387,47 @@ export function loadConfig(configPath: string): AgentConfig {
     throw new VesperError(`"subagents" must be a mapping in ${configPath}`, 1);
   }
 
+  const mcpServersRaw = parsed.mcp_servers;
+  const mcpServers: Record<string, McpServerConfig> = {};
+  if (mcpServersRaw !== undefined && mcpServersRaw !== null) {
+    if (!isPlainObject(mcpServersRaw)) {
+      throw new VesperError(`"mcp_servers" must be a mapping in ${configPath}`, 1);
+    }
+
+    for (const [serverName, serverRaw] of Object.entries(mcpServersRaw)) {
+      if (!isPlainObject(serverRaw)) {
+        throw new VesperError(`"mcp_servers.${serverName}" must be a mapping in ${configPath}`, 1);
+      }
+
+      if (typeof serverRaw.command !== "string") {
+        throw new VesperError(
+          `"mcp_servers.${serverName}.command" must be a string in ${configPath}`,
+          1,
+        );
+      }
+
+      const args = serverRaw.args ?? [];
+      assertStringArray(args, `mcp_servers.${serverName}.args`);
+
+      const env = serverRaw.env ?? [];
+      assertStringArray(env, `mcp_servers.${serverName}.env`);
+
+      if (serverRaw.allow_launch !== true) {
+        throw new VesperError(
+          `"mcp_servers.${serverName}.allow_launch" must be true in ${configPath}`,
+          1,
+        );
+      }
+
+      mcpServers[serverName] = {
+        command: serverRaw.command,
+        args,
+        env,
+        allow_launch: true,
+      };
+    }
+  }
+
   return {
     system_prompt: parsed.system_prompt,
     token_budget: parsed.token_budget,
@@ -394,12 +449,15 @@ export function loadConfig(configPath: string): AgentConfig {
     signals,
     context_management: contextManagement,
     subagents,
+    mcp_servers: mcpServers,
     tools: {
       read: toolRead,
       write: toolWrite,
       delete: toolDelete,
       commands: toolCommands,
       subagents: toolSubagents,
+      mcp_read: toolMcpRead,
+      mcp_write: toolMcpWrite,
     },
   };
 }

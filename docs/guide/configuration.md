@@ -38,6 +38,10 @@ tools:
     - "git commit"
   subagents:                      # Agent names allowed for subagent / Task dispatch
     - "reviewer"
+  mcp_read:                       # Exact <server>.<tool> MCP read grants
+    - "jira.search"
+  mcp_write:                      # Exact <server>.<tool> MCP mutation grants
+    - "jira.comment"
 
 # --- Optional ---
 
@@ -74,6 +78,13 @@ subagents:
   parallel_same_turn: false         # Run same-turn subagent / Task calls concurrently
   max_concurrency: 4                # Max concurrent child agents when enabled
   aggregate_token_budget: null      # Optional total child-token cap for one parent invocation
+
+mcp_servers:
+  jira:
+    command: "bun"                  # Local stdio MCP server executable
+    args: ["jira-mcp.mjs"]          # Optional argv
+    env: ["JIRA_TOKEN"]             # Extra env vars passed to this server
+    allow_launch: true              # Required explicit launch acknowledgement
 ```
 
 ## Key Details
@@ -90,6 +101,15 @@ subagents:
 sub-agent calls run sequentially. Set `subagents.parallel_same_turn: true` on the parent to run
 eligible child calls concurrently. A child is eligible when it has no write/delete/command access,
 or when its own config sets `parallel_safe: true`.
+
+**`mcp_servers`** defines local stdio MCP servers. Vesper only starts servers referenced by
+`tools.mcp_read` or `tools.mcp_write`, initializes them before the first model call, lists their
+tools, and exposes only exact granted `<server>.<tool>` entries. Server processes receive the same
+safe baseline environment as commands plus the names listed in that server's `env` array.
+
+**`tools.mcp_read` / `tools.mcp_write`** split MCP capabilities by side effect. Both use exact
+`<server>.<tool>` matching; glob patterns are not supported. Granted tools appear to the model as
+`mcp__<server>__<tool>`.
 
 **`provider`** selects the model API. `anthropic` uses the Anthropic Messages API and
 requires `ANTHROPIC_API_KEY`. `openai` uses the OpenAI Responses API and requires
@@ -130,6 +150,9 @@ Files that don't exist, are empty, or resolve outside cwd via symlinks are silen
 - `max_tool_result_size` must be a finite positive number
 - `subagents.max_concurrency` must be a positive integer
 - `subagents.aggregate_token_budget` must be null or a positive integer
+- `mcp_servers.<name>.command` must be a string
+- `mcp_servers.<name>.args` and `mcp_servers.<name>.env` must be arrays of strings
+- `mcp_servers.<name>.allow_launch` must be exactly `true`
 - Threshold values must be between 0 (exclusive) and 1 (inclusive)
 - All array fields must contain only strings
 - Agent names cannot contain `/`, `\`, or `..`
