@@ -1,6 +1,12 @@
 ---
 title: Parallel same-turn sub-agent execution
-status: ready
+status: done
+last_review_status: clean
+last_reviewed_at: 2026-05-06
+last_review_base: 416ae40de8035680ff0c8f8f6144cc9eafbb0fa8
+last_review_head: cd5679c08edeeab6057f9781e4782cde6a991c2e
+last_review_worktree: clean
+last_review_diff_hash: 4eb9f4c400a06000e01d1e56e0da62f436910d903fbae359a289188479def642
 ---
 
 ## Context
