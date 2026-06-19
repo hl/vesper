@@ -11,6 +11,41 @@ import { VERSION } from "./version.js";
 
 export const RESERVED_NAMES = ["init", "run", "help", "version"];
 
+const HELP_EPILOG = `
+Setup:
+  vesper init                         Create .vesper/ in the current project
+  vesper init --global                Create ~/.config/vesper/ for shared agents
+  vesper run <agent> "task"           Run .vesper/agents/<agent>.yml
+  echo "task" | vesper run <agent>    Read the task from stdin
+
+Agent files:
+  Local configs:  .vesper/agents/<name>.yml
+  Global configs: ~/.config/vesper/agents/<name>.yml
+  System prompts: system_prompt is relative to .vesper/
+  Required YAML:  system_prompt, token_budget, tools
+
+Providers:
+  provider: anthropic                 Uses ANTHROPIC_API_KEY
+  provider: openai                    Uses OpenAI Responses API and OPENAI_API_KEY
+  provider: openai
+  openai_api: chat_completions        Uses OpenAI-compatible /v1/chat/completions
+  base_url: http://127.0.0.1:8080/v1  Use local servers such as llama.cpp
+
+Minimal local llama.cpp agent:
+  Start server:
+    llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 --jinja
+  Agent YAML:
+    provider: openai
+    openai_api: chat_completions
+    base_url: http://127.0.0.1:8080/v1
+    model: local-model
+
+More docs:
+  README.md
+  docs/guide/configuration.md
+  docs/guide/llama-cpp.md
+`.trim();
+
 export function loadContextFiles(
   files: string[],
   cwd: string,
@@ -68,6 +103,8 @@ type ParsedArgs = ParsedRunArgs | ParsedInitArgs;
 export function buildParser(argv: Argv): Argv {
   return argv
     .scriptName("vesper")
+    .usage("$0 [agent] [prompt..]\n\nPermission-gated AI agent runtime.")
+    .wrap(120)
     .version(VERSION)
     .option("cwd", {
       type: "string",
@@ -123,6 +160,10 @@ export function buildParser(argv: Argv): Argv {
           describe: "Task prompt. If omitted, stdin is used",
         }),
     )
+    .example("$0 init", "Scaffold .vesper/ with an example agent")
+    .example('$0 run builder "Implement the auth module"', "Run an agent with a task")
+    .example('echo "Review this change" | $0 run reviewer', "Read a task from stdin")
+    .epilog(HELP_EPILOG)
     .strict();
 }
 

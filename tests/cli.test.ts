@@ -64,6 +64,24 @@ describe("CLI subcommand routing", () => {
   });
 });
 
+describe("CLI help", () => {
+  it("includes setup, config, provider, and local model guidance", async () => {
+    const parser = buildParser(yargs([]));
+    const help = await parser.getHelp();
+
+    expect(help).toContain("Permission-gated AI agent runtime");
+    expect(help).toContain("vesper init");
+    expect(help).toContain(".vesper/agents/<name>.yml");
+    expect(help).toContain("Required YAML");
+    expect(help).toContain("ANTHROPIC_API_KEY");
+    expect(help).toContain("OPENAI_API_KEY");
+    expect(help).toContain("openai_api: chat_completions");
+    expect(help).toContain("base_url: http://127.0.0.1:8080/v1");
+    expect(help).toContain("llama-server -m /path/to/model.gguf");
+    expect(help).toContain("docs/guide/llama-cpp.md");
+  });
+});
+
 describe("task prompt resolution", () => {
   it("joins positional prompt words", () => {
     expect(getTaskPromptFromArgs({ prompt: ["fix", "the", "bug"] })).toBe("fix the bug");

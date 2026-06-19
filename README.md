@@ -87,6 +87,40 @@ Global agents at `~/.config/vesper/` follow the same layout. Local agents take p
 
 **Signals** — `.vesper-complete`, `.vesper-needs-approval`, `.vesper-failed`. Configurable names. Complete signals include final output as JSON when available. The binary refuses to start if stale signals exist.
 
+## Local Models with llama.cpp
+
+Start an OpenAI-compatible local server:
+
+```sh
+llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080 --jinja
+```
+
+Then configure an agent to use Chat Completions against the local `/v1` endpoint:
+
+```yaml
+system_prompt: system_prompts/local.md
+token_budget: 100000
+provider: openai
+openai_api: chat_completions
+base_url: http://127.0.0.1:8080/v1
+model: local-model
+
+tools:
+  read:
+    - "**"
+  write: []
+  delete: []
+  commands: []
+```
+
+Run it like any other agent:
+
+```sh
+vesper run local "Read package.json and summarize the scripts."
+```
+
+For local Chat Completions, `OPENAI_API_KEY` is optional. If unset, Vesper supplies a placeholder key for local servers that ignore authentication. See [llama.cpp Local Models](docs/guide/llama-cpp.md) for more details and notes on tool calling.
+
 ## Built-in Agents
 
 This repo ships four example agents you can copy and adapt:
