@@ -37,6 +37,8 @@ export interface AgentConfig {
   parallel_safe: boolean;
   log_denied_calls: boolean;
   provider: "anthropic" | "openai";
+  openai_api: "responses" | "chat_completions";
+  base_url: string | null;
   model: string | undefined;
   reveal_permissions: boolean;
   log_events: boolean;
@@ -193,6 +195,29 @@ export function loadConfig(configPath: string): AgentConfig {
   const provider = parsed.provider ?? "anthropic";
   if (provider !== "anthropic" && provider !== "openai") {
     throw new VesperError(`"provider" must be "anthropic" or "openai" in ${configPath}`, 1);
+  }
+
+  const openaiApi = parsed.openai_api ?? "responses";
+  if (
+    typeof openaiApi !== "string" ||
+    (openaiApi !== "responses" && openaiApi !== "chat_completions")
+  ) {
+    throw new VesperError(
+      `"openai_api" must be "responses" or "chat_completions" in ${configPath}`,
+      1,
+    );
+  }
+
+  const baseUrl = parsed.base_url ?? null;
+  if (baseUrl !== null && typeof baseUrl !== "string") {
+    throw new VesperError(`"base_url" must be a string or null in ${configPath}`, 1);
+  }
+
+  if (provider !== "openai" && (parsed.openai_api !== undefined || parsed.base_url !== undefined)) {
+    throw new VesperError(
+      `"openai_api" and "base_url" require provider "openai" in ${configPath}`,
+      1,
+    );
   }
 
   const commandTimeout = parsed.command_timeout ?? 30;
@@ -435,6 +460,8 @@ export function loadConfig(configPath: string): AgentConfig {
     log_denied_calls:
       typeof parsed.log_denied_calls === "boolean" ? parsed.log_denied_calls : false,
     provider,
+    openai_api: openaiApi,
+    base_url: baseUrl,
     model: typeof model === "string" ? model : undefined,
     reveal_permissions:
       typeof parsed.reveal_permissions === "boolean" ? parsed.reveal_permissions : false,

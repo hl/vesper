@@ -4,6 +4,8 @@
 system_prompt: system_prompts/example.md   # Relative to .vesper/
 token_budget: 100000                       # Max tokens per run
 provider: anthropic                        # "anthropic" or "openai"
+# openai_api: responses                    # "responses" or "chat_completions" (OpenAI only)
+# base_url: null                           # OpenAI-compatible server URL, e.g. llama.cpp /v1
 # model: gpt-5.5                           # Optional; provider default when omitted
 parallel_safe: false                       # Allows this child to run in parallel despite write/command access
 max_tool_result_size: 50000                # Truncate tool results beyond this (bytes)

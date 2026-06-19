@@ -563,8 +563,8 @@ async function executeSubagentTool(
     const subagentConfig = loadConfig(resolved.configPath);
     const systemPrompt = loadAgentSystemPrompt(subagentConfig, resolved.vesperDir, cwd);
     const subagentClient =
-      useFreshClient || subagentConfig.provider !== config.provider
-        ? clientFactory(subagentConfig.provider)
+      useFreshClient || !usesSameMessageClientConfig(subagentConfig, config)
+        ? clientFactory(subagentConfig)
         : client;
     const result = await runAgent(
       subagentConfig,
@@ -762,9 +762,41 @@ type OpenAIResponse = {
   } | null;
 };
 
+type OpenAIChatCompletion = {
+  id?: string;
+  choices?: Array<{
+    finish_reason?: string | null;
+    message?: {
+      content?: string | null;
+      tool_calls?: Array<{
+        id?: string;
+        type?: string;
+        function?: {
+          name?: string;
+          arguments?: unknown;
+        };
+      }> | null;
+    } | null;
+  }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  } | null;
+};
+
 interface OpenAIResponsesClient {
   responses: {
     create(params: OpenAI.Responses.ResponseCreateParamsNonStreaming): Promise<unknown>;
+  };
+}
+
+interface OpenAIChatCompletionsClient {
+  chat: {
+    completions: {
+      create(
+        params: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+      ): Promise<unknown>;
+    };
   };
 }
 
@@ -772,7 +804,7 @@ function defaultModelForProvider(provider: AgentConfig["provider"]): string {
   return provider === "openai" ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
 }
 
-type MessageClientFactory = (provider: AgentConfig["provider"]) => MessageClient;
+type MessageClientFactory = (config: AgentConfig) => MessageClient;
 
 class AnthropicMessagesMessageClient implements MessageClient {
   private readonly client: Anthropic.Messages;
@@ -787,11 +819,29 @@ class AnthropicMessagesMessageClient implements MessageClient {
   }
 }
 
-function createDefaultMessageClient(provider: AgentConfig["provider"]): MessageClient {
-  if (provider === "openai") {
-    return new OpenAIResponsesMessageClient();
+function openAIClientOptions(config: AgentConfig): ConstructorParameters<typeof OpenAI>[0] {
+  const options: ConstructorParameters<typeof OpenAI>[0] = {};
+  if (config.base_url !== null) {
+    options.baseURL = config.base_url;
+  }
+  if (config.openai_api === "chat_completions") {
+    options.apiKey = process.env.OPENAI_API_KEY ?? "no-key";
+  }
+  return options;
+}
+
+function createDefaultMessageClient(config: AgentConfig): MessageClient {
+  if (config.provider === "openai") {
+    if (config.openai_api === "chat_completions") {
+      return new OpenAIChatCompletionsMessageClient(new OpenAI(openAIClientOptions(config)));
+    }
+    return new OpenAIResponsesMessageClient(new OpenAI(openAIClientOptions(config)));
   }
   return new AnthropicMessagesMessageClient();
+}
+
+function usesSameMessageClientConfig(a: AgentConfig, b: AgentConfig): boolean {
+  return a.provider === b.provider && a.openai_api === b.openai_api && a.base_url === b.base_url;
 }
 
 function stringifySystem(system: Anthropic.MessageCreateParamsNonStreaming["system"]): string {
@@ -886,6 +936,9 @@ function convertToolsToOpenAI(tools: Anthropic.Tool[] | undefined): Array<Record
 }
 
 function parseOpenAIArguments(value: unknown): Record<string, unknown> {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
   if (typeof value !== "string" || value.trim().length === 0) return {};
   try {
     const parsed = JSON.parse(value);
@@ -893,6 +946,78 @@ function parseOpenAIArguments(value: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function convertMessagesToOpenAIChatMessages(
+  system: Anthropic.MessageCreateParamsNonStreaming["system"],
+  messages: Anthropic.MessageParam[],
+): Array<Record<string, unknown>> {
+  const chatMessages: Array<Record<string, unknown>> = [];
+  const systemText = stringifySystem(system);
+  if (systemText.length > 0) {
+    chatMessages.push({ role: "system", content: systemText });
+  }
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      if (typeof message.content === "string") {
+        chatMessages.push({ role: "user", content: message.content });
+        continue;
+      }
+
+      const textParts: string[] = [];
+      for (const block of message.content) {
+        if (block.type === "tool_result") {
+          chatMessages.push({
+            role: "tool",
+            tool_call_id: block.tool_use_id,
+            content: normalizeToolResultContent(block.content),
+          });
+        } else if (block.type === "text") {
+          textParts.push(block.text);
+        }
+      }
+      if (textParts.length > 0) {
+        chatMessages.push({ role: "user", content: textParts.join("\n\n") });
+      }
+      continue;
+    }
+
+    const content = Array.isArray(message.content) ? message.content : [];
+    const text = convertMessageTextContent(message.content);
+    const toolCalls = content
+      .filter((block): block is Anthropic.ToolUseBlock => block.type === "tool_use")
+      .map((block) => ({
+        id: block.id,
+        type: "function",
+        function: {
+          name: block.name,
+          arguments: JSON.stringify(block.input ?? {}),
+        },
+      }));
+
+    chatMessages.push({
+      role: "assistant",
+      content: text.length > 0 ? text : null,
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    });
+  }
+
+  return chatMessages;
+}
+
+function convertToolsToOpenAIChatTools(
+  tools: Anthropic.Tool[] | undefined,
+): Array<Record<string, unknown>> {
+  return (tools ?? []).map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.input_schema,
+      strict: tool.strict === true && isOpenAIStrictCompatible(tool.input_schema),
+    },
+  }));
 }
 
 function extractOpenAITextContent(item: Record<string, unknown>): string[] {
@@ -915,6 +1040,19 @@ function makeUsageFromOpenAI(response: OpenAIResponse): Anthropic.Usage {
   return {
     input_tokens: response.usage?.input_tokens ?? 0,
     output_tokens: response.usage?.output_tokens ?? 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation: null,
+    inference_geo: null,
+    server_tool_use: null,
+    service_tier: null,
+  } as Anthropic.Usage;
+}
+
+function makeUsageFromOpenAIChat(response: OpenAIChatCompletion): Anthropic.Usage {
+  return {
+    input_tokens: response.usage?.prompt_tokens ?? 0,
+    output_tokens: response.usage?.completion_tokens ?? 0,
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
     cache_creation: null,
@@ -983,6 +1121,58 @@ function convertOpenAIResponse(response: OpenAIResponse, model: string): Anthrop
   } as Anthropic.Message;
 }
 
+function convertOpenAIChatCompletion(
+  response: OpenAIChatCompletion,
+  model: string,
+): Anthropic.Message {
+  const choice = response.choices?.[0];
+  if (choice === undefined || choice.message === null || choice.message === undefined) {
+    throw new Error("OpenAI Chat Completions response did not include a message");
+  }
+
+  const content: Anthropic.ContentBlock[] = [];
+  if (typeof choice.message.content === "string" && choice.message.content.length > 0) {
+    content.push({
+      type: "text",
+      text: choice.message.content,
+      citations: null,
+    } as Anthropic.TextBlock);
+  }
+
+  for (const toolCall of choice.message.tool_calls ?? []) {
+    if (toolCall.function === undefined) {
+      throw new Error("OpenAI Chat Completions tool call did not include a function");
+    }
+    content.push({
+      type: "tool_use",
+      id: typeof toolCall.id === "string" ? toolCall.id : randomUUID(),
+      name: typeof toolCall.function.name === "string" ? toolCall.function.name : "unknown",
+      input: parseOpenAIArguments(toolCall.function.arguments),
+      caller: { type: "direct" },
+    } as Anthropic.ToolUseBlock);
+  }
+
+  const stopReason: Anthropic.Message["stop_reason"] =
+    (choice.message.tool_calls?.length ?? 0) > 0 || choice.finish_reason === "tool_calls"
+      ? "tool_use"
+      : choice.finish_reason === "length"
+        ? "max_tokens"
+        : "end_turn";
+
+  return {
+    id: response.id ?? `chatcmpl_${randomUUID()}`,
+    type: "message",
+    role: "assistant",
+    model,
+    stop_reason: stopReason,
+    stop_sequence: null,
+    stop_details: null,
+    container: null,
+    content,
+    usage: makeUsageFromOpenAIChat(response),
+  } as Anthropic.Message;
+}
+
 export class OpenAIResponsesMessageClient implements MessageClient {
   private readonly client: OpenAIResponsesClient;
 
@@ -1004,6 +1194,26 @@ export class OpenAIResponsesMessageClient implements MessageClient {
   }
 }
 
+export class OpenAIChatCompletionsMessageClient implements MessageClient {
+  private readonly client: OpenAIChatCompletionsClient;
+
+  constructor(client: OpenAIChatCompletionsClient) {
+    this.client = client;
+  }
+
+  async create(params: MessageCreateParams): Promise<Anthropic.Message> {
+    const response = (await this.client.chat.completions.create({
+      model: params.model,
+      messages: convertMessagesToOpenAIChatMessages(params.system, params.messages),
+      tools: convertToolsToOpenAIChatTools(params.tools as Anthropic.Tool[] | undefined),
+      max_tokens: params.max_tokens,
+      parallel_tool_calls: params.parallelToolCalls === true,
+    } as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming)) as unknown as OpenAIChatCompletion;
+
+    return convertOpenAIChatCompletion(response, params.model);
+  }
+}
+
 export interface RunAgentOptions {
   signalPaths?: SignalPaths;
   subagentDepth?: number;
@@ -1021,7 +1231,7 @@ export async function runAgent(
   options?: RunAgentOptions,
 ): Promise<RunAgentResult> {
   const clientFactory = options?.clientFactory ?? createDefaultMessageClient;
-  const messagesClient: MessageClient = client ?? clientFactory(config.provider);
+  const messagesClient: MessageClient = client ?? clientFactory(config);
   const logger = new Logger(config.log_events);
   const signalPaths = options?.signalPaths ?? getSignalPaths(cwd, config.signals);
   const subagentDepth = options?.subagentDepth ?? 0;

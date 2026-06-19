@@ -85,10 +85,11 @@ Existing files are preserved unless `--force` is specified. Symlinks on any targ
 
 Vesper reads provider API keys from the standard SDK environment variables:
 
-| Provider | Required variable |
-|----------|-------------------|
-| `anthropic` | `ANTHROPIC_API_KEY` |
-| `openai` | `OPENAI_API_KEY` |
+| Provider config | Required variable |
+|-----------------|-------------------|
+| `provider: anthropic` | `ANTHROPIC_API_KEY` |
+| `provider: openai`, `openai_api: responses` | `OPENAI_API_KEY` |
+| `provider: openai`, `openai_api: chat_completions` | None for local servers; `OPENAI_API_KEY` is used if set |
 
 ## Exit Codes
 

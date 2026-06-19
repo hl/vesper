@@ -688,6 +688,80 @@ tools: {}
     const path = writeYaml("openai-provider.yml", yaml);
     const config = loadConfig(path);
     expect(config.provider).toBe("openai");
+    expect(config.openai_api).toBe("responses");
+    expect(config.base_url).toBeNull();
+  });
+
+  it("parses OpenAI Chat Completions endpoint config", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+provider: openai
+openai_api: chat_completions
+base_url: http://127.0.0.1:8080/v1
+model: local-model
+tools: {}
+`;
+    const path = writeYaml("openai-chat-completions.yml", yaml);
+    const config = loadConfig(path);
+    expect(config.provider).toBe("openai");
+    expect(config.openai_api).toBe("chat_completions");
+    expect(config.base_url).toBe("http://127.0.0.1:8080/v1");
+    expect(config.model).toBe("local-model");
+  });
+
+  it("exits with code 1 when openai_api is invalid", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+provider: openai
+openai_api: completions
+tools: {}
+`;
+    const path = writeYaml("bad-openai-api.yml", yaml);
+    expect(() => loadConfig(path)).toThrow(VesperError);
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).message).toContain("openai_api");
+    }
+  });
+
+  it("exits with code 1 when base_url is not a string or null", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+provider: openai
+base_url: 123
+tools: {}
+`;
+    const path = writeYaml("bad-base-url.yml", yaml);
+    expect(() => loadConfig(path)).toThrow(VesperError);
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).message).toContain("base_url");
+    }
+  });
+
+  it("exits with code 1 when OpenAI endpoint fields are used with Anthropic", () => {
+    const yaml = `
+system_prompt: prompt.md
+token_budget: 50000
+openai_api: chat_completions
+base_url: http://127.0.0.1:8080/v1
+tools: {}
+`;
+    const path = writeYaml("anthropic-openai-fields.yml", yaml);
+    expect(() => loadConfig(path)).toThrow(VesperError);
+    try {
+      loadConfig(path);
+    } catch (e) {
+      expect(e).toBeInstanceOf(VesperError);
+      expect((e as VesperError).message).toContain('provider "openai"');
+    }
   });
 
   it("exits with code 1 when command_timeout is zero", () => {

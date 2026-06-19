@@ -36,6 +36,8 @@ echo "Implement the auth module" | vesper run builder
 
 Set `ANTHROPIC_API_KEY` for the default Anthropic provider, or set
 `provider: openai` in the agent config and use `OPENAI_API_KEY` for OpenAI models.
+Local OpenAI-compatible servers such as llama.cpp can use `provider: openai`,
+`openai_api: chat_completions`, and `base_url`.
 
 Or pass the task entirely as command-line arguments:
 
@@ -69,7 +71,7 @@ Global agents at `~/.config/vesper/` follow the same layout. Local agents take p
 
 ## Concepts
 
-**Providers** — Agents default to Anthropic Claude via `provider: anthropic`, or can use OpenAI Responses API models such as `gpt-5.5` with `provider: openai`.
+**Providers** — Agents default to Anthropic Claude via `provider: anthropic`, or can use OpenAI Responses API models such as `gpt-5.5` with `provider: openai`. OpenAI-compatible local servers can use `provider: openai`, `openai_api: chat_completions`, and `base_url`; see [llama.cpp](docs/guide/llama-cpp.md).
 
 **Tools** — Six file/command tools: `read_file`, `list_files`, `write_file`, `patch_file`, `delete_file`, `run_command` — each gated by glob patterns in the agent config. Optional `subagent` / `Task` dispatch is gated by exact agent names in `tools.subagents`; same-turn child calls can run concurrently with opt-in `subagents.parallel_same_turn`. Optional local stdio MCP tools are gated by exact `tools.mcp_read` / `tools.mcp_write` grants and exposed as `mcp__<server>__<tool>`. Plus a `signal` tool (always available) for explicit exit control.
 
@@ -115,6 +117,7 @@ vesper --help         Show help
 Detailed guides are in [`docs/guide/`](docs/guide/):
 
 - [Configuration Reference](docs/guide/configuration.md) — every YAML key, types, defaults, validation
+- [llama.cpp Local Models](docs/guide/llama-cpp.md) — run Vesper against a local `llama-server`
 - [Permissions](docs/guide/permissions.md) — path globs, command matching, structural safety
 - [Tools](docs/guide/tools.md) — each tool's parameters, returns, and error modes
 - [Context Management](docs/guide/context-management.md) — pruning, compaction, token estimation

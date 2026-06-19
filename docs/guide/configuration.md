@@ -46,6 +46,8 @@ tools:
 # --- Optional ---
 
 provider: anthropic               # "anthropic" or "openai" (default: anthropic)
+openai_api: responses             # "responses" or "chat_completions" (OpenAI only)
+base_url: null                    # Override OpenAI base URL; useful for local servers
 model: claude-sonnet-4-6          # Model ID (provider default when omitted)
 parallel_safe: false              # Child agent may run in parallel despite write/delete/command access
 command_timeout: 30                # Seconds before killing a command (default: 30)
@@ -112,8 +114,16 @@ safe baseline environment as commands plus the names listed in that server's `en
 `mcp__<server>__<tool>`.
 
 **`provider`** selects the model API. `anthropic` uses the Anthropic Messages API and
-requires `ANTHROPIC_API_KEY`. `openai` uses the OpenAI Responses API and requires
-`OPENAI_API_KEY`.
+requires `ANTHROPIC_API_KEY`. `openai` uses the OpenAI SDK and defaults to the
+Responses API.
+
+**`openai_api`** applies only when `provider: openai`. The default, `responses`, uses
+the OpenAI Responses API. `chat_completions` uses the OpenAI-compatible
+`/v1/chat/completions` shape for local servers such as llama.cpp.
+
+**`base_url`** applies only when `provider: openai`. Set it to an OpenAI-compatible
+server root such as `http://127.0.0.1:8080/v1`. When `openai_api: chat_completions`
+is used, Vesper supplies a local placeholder API key if `OPENAI_API_KEY` is unset.
 
 **`model`** defaults to `claude-sonnet-4-6` for `provider: anthropic` and `gpt-5.5`
 for `provider: openai`. It also determines the context window via longest prefix match:
@@ -145,6 +155,8 @@ Files that don't exist, are empty, or resolve outside cwd via symlinks are silen
 
 - `token_budget` must be a finite positive number
 - `provider` must be `anthropic` or `openai`
+- `openai_api` must be `responses` or `chat_completions`
+- `openai_api` and `base_url` require `provider: openai`
 - `parallel_safe` must be a boolean
 - `command_timeout` must be a finite positive number
 - `max_tool_result_size` must be a finite positive number
@@ -191,6 +203,29 @@ tools:
   commands:
     - "bun test"
 ```
+
+## Example: llama.cpp Local Agent
+
+```yaml
+system_prompt: system_prompts/local-builder.md
+token_budget: 100000
+provider: openai
+openai_api: chat_completions
+base_url: http://127.0.0.1:8080/v1
+model: local-model
+
+tools:
+  read:
+    - "**"
+  write:
+    - "src/**"
+    - "tests/**"
+  delete: []
+  commands:
+    - "bun test"
+```
+
+See [llama.cpp Local Models](llama-cpp.md) for a runnable setup.
 
 ## Example: Full-Access Builder
 

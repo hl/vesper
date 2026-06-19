@@ -18,6 +18,7 @@ import {
   extractLastText,
   isContextLengthError,
   type MessageClient,
+  OpenAIChatCompletionsMessageClient,
   OpenAIResponsesMessageClient,
   runAgent,
 } from "../src/agent.js";
@@ -38,6 +39,8 @@ function makeConfig(overrides?: AgentConfigOverrides): AgentConfig {
     parallel_safe: overrides?.parallel_safe ?? false,
     log_denied_calls: overrides?.log_denied_calls ?? false,
     provider: overrides?.provider ?? "anthropic",
+    openai_api: overrides?.openai_api ?? "responses",
+    base_url: overrides?.base_url ?? null,
     model: overrides?.model,
     reveal_permissions: overrides?.reveal_permissions ?? false,
     log_events: overrides?.log_events ?? false,
@@ -234,6 +237,9 @@ function writeTestAgentConfig(
     systemPrompt?: string;
     tools?: string;
     provider?: AgentConfig["provider"];
+    openaiApi?: AgentConfig["openai_api"];
+    baseUrl?: string | null;
+    model?: string;
     parallelSafe?: boolean;
   },
 ): void {
@@ -247,6 +253,7 @@ function writeTestAgentConfig(
 system_prompt: system_prompts/${name}.md
 token_budget: 100000
 provider: ${options?.provider ?? "anthropic"}
+${options?.openaiApi !== undefined ? `openai_api: ${options.openaiApi}\n` : ""}${options?.baseUrl !== undefined ? `base_url: ${options.baseUrl}\n` : ""}${options?.model !== undefined ? `model: ${options.model}\n` : ""}
 parallel_safe: ${options?.parallelSafe ?? false}
 default_signal: complete
 tools:
@@ -583,6 +590,36 @@ describe("runAgent", () => {
 
     expect(capturedParams).toBeDefined();
     expect(capturedParams?.model).toBe("gpt-5.5");
+  });
+
+  it("passes full OpenAI endpoint config to the default client factory", async () => {
+    const config = makeConfig({
+      provider: "openai",
+      openai_api: "chat_completions",
+      base_url: "http://127.0.0.1:8080/v1",
+      model: "local-model",
+    });
+
+    let capturedConfig: AgentConfig | undefined;
+    const stubClient: MessageClient = {
+      create: async () =>
+        makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 50, output_tokens: 30 },
+        }),
+    };
+
+    await runAgent(config, "system", "task", tempDir, "openai-chat-agent", undefined, {
+      clientFactory: (factoryConfig) => {
+        capturedConfig = factoryConfig;
+        return stubClient;
+      },
+    });
+
+    expect(capturedConfig?.provider).toBe("openai");
+    expect(capturedConfig?.openai_api).toBe("chat_completions");
+    expect(capturedConfig?.base_url).toBe("http://127.0.0.1:8080/v1");
+    expect(capturedConfig?.model).toBe("local-model");
   });
 
   // R2: Prompt caching — system is an array with cache_control
@@ -1369,8 +1406,8 @@ describe("sub-agent tool", () => {
     };
 
     await runAgent(config, "system", "task", tempDir, "parent", parentClient, {
-      clientFactory: (provider) => {
-        subagentProvider = provider;
+      clientFactory: (subagentConfig) => {
+        subagentProvider = subagentConfig.provider;
         return subagentClient;
       },
     });
@@ -1382,6 +1419,77 @@ describe("sub-agent tool", () => {
     const parsed = JSON.parse(capturedToolResult as string);
     expect(parsed.ok).toBe(true);
     expect(parsed.message).toBe("Anthropic sub-agent result.");
+  });
+
+  it("uses a fresh sub-agent client when the OpenAI API mode differs", async () => {
+    writeTestAgentConfig("reviewer", {
+      provider: "openai",
+      openaiApi: "chat_completions",
+      baseUrl: "http://127.0.0.1:8080/v1",
+      model: "local-model",
+    });
+    const config = makeConfig({
+      provider: "openai",
+      openai_api: "responses",
+      tools: { read: [], write: [], delete: [], commands: [], subagents: ["reviewer"] },
+    });
+
+    let parentCallCount = 0;
+    let capturedSubagentConfig: AgentConfig | undefined;
+    let capturedSubagentParams: Anthropic.MessageCreateParamsNonStreaming | undefined;
+    let capturedToolResult: string | undefined;
+
+    const parentClient: MessageClient = {
+      create: async (params) => {
+        parentCallCount++;
+        if (parentCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            content: [
+              makeToolUseBlock(
+                "subagent",
+                { agent: "reviewer", prompt: "inspect local output" },
+                "toolu_openai_api_mode",
+              ),
+            ],
+          });
+        }
+
+        const lastMsg = params.messages[params.messages.length - 1];
+        if (lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+          const toolResult = lastMsg.content[0] as Anthropic.ToolResultBlockParam;
+          capturedToolResult = toolResult.content as string;
+        }
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
+
+    const subagentClient: MessageClient = {
+      create: async (params) => {
+        capturedSubagentParams = params;
+        return makeMessage({
+          stop_reason: "end_turn",
+          content: [makeTextBlock("Local sub-agent result.")],
+        });
+      },
+    };
+
+    await runAgent(config, "system", "task", tempDir, "parent", parentClient, {
+      clientFactory: (subagentConfig) => {
+        capturedSubagentConfig = subagentConfig;
+        return subagentClient;
+      },
+    });
+
+    expect(parentCallCount).toBe(2);
+    expect(capturedSubagentConfig?.provider).toBe("openai");
+    expect(capturedSubagentConfig?.openai_api).toBe("chat_completions");
+    expect(capturedSubagentConfig?.base_url).toBe("http://127.0.0.1:8080/v1");
+    expect(capturedSubagentParams?.model).toBe("local-model");
+    expect(capturedSubagentParams?.messages[0].content).toBe("inspect local output");
+    const parsed = JSON.parse(capturedToolResult as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.message).toBe("Local sub-agent result.");
   });
 
   it("denies sub-agent calls for agents outside tools.subagents", async () => {
@@ -2116,6 +2224,219 @@ describe("OpenAIResponsesMessageClient", () => {
     expect(capturedInput?.some((item) => item.type === "function_call_output")).toBe(true);
     expect(response.stop_reason).toBe("end_turn");
     expect(extractLastText(response)).toBe("Done.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OpenAI Chat Completions adapter
+// ---------------------------------------------------------------------------
+
+describe("OpenAIChatCompletionsMessageClient", () => {
+  it("converts Vesper tools and Chat Completions tool calls", async () => {
+    let capturedParams: Record<string, unknown> | undefined;
+    const client = new OpenAIChatCompletionsMessageClient({
+      chat: {
+        completions: {
+          create: async (params) => {
+            capturedParams = params as unknown as Record<string, unknown>;
+            return {
+              id: "chatcmpl_test",
+              choices: [
+                {
+                  finish_reason: "tool_calls",
+                  message: {
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call_read",
+                        type: "function",
+                        function: {
+                          name: "read_file",
+                          arguments: '{"path":"src/index.ts"}',
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 12, completion_tokens: 4 },
+            };
+          },
+        },
+      },
+    });
+
+    const response = await client.create({
+      model: "local-model",
+      max_tokens: 4096,
+      system: [{ type: "text", text: "System instructions." }],
+      tools: [
+        {
+          name: "read_file",
+          description: "Read a file.",
+          input_schema: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+          strict: true,
+        },
+      ],
+      messages: [{ role: "user", content: "Read src/index.ts" }],
+      parallelToolCalls: true,
+    } as Anthropic.MessageCreateParamsNonStreaming & { parallelToolCalls: boolean });
+
+    expect(capturedParams?.model).toBe("local-model");
+    expect(capturedParams?.max_tokens).toBe(4096);
+    expect(capturedParams?.parallel_tool_calls).toBe(true);
+    expect((capturedParams?.messages as Array<Record<string, unknown>>)[0]).toEqual({
+      role: "system",
+      content: "System instructions.",
+    });
+    const tools = capturedParams?.tools as Array<{
+      type: string;
+      function: Record<string, unknown>;
+    }>;
+    expect(tools[0].type).toBe("function");
+    expect(tools[0].function.name).toBe("read_file");
+    expect(response.stop_reason).toBe("tool_use");
+    expect(response.usage.input_tokens).toBe(12);
+    expect(response.usage.output_tokens).toBe(4);
+    const toolUse = response.content[0] as Anthropic.ToolUseBlock;
+    expect(toolUse.type).toBe("tool_use");
+    expect(toolUse.id).toBe("call_read");
+    expect(toolUse.name).toBe("read_file");
+    expect(toolUse.input).toEqual({ path: "src/index.ts" });
+  });
+
+  it("passes prior assistant tool calls and tool results back to Chat Completions", async () => {
+    let capturedMessages: Array<Record<string, unknown>> | undefined;
+    const client = new OpenAIChatCompletionsMessageClient({
+      chat: {
+        completions: {
+          create: async (params) => {
+            capturedMessages = params.messages as unknown as Array<Record<string, unknown>>;
+            return {
+              id: "chatcmpl_done",
+              choices: [
+                {
+                  finish_reason: "stop",
+                  message: { content: "Done.", tool_calls: null },
+                },
+              ],
+              usage: { prompt_tokens: 20, completion_tokens: 5 },
+            };
+          },
+        },
+      },
+    });
+
+    const response = await client.create({
+      model: "local-model",
+      max_tokens: 4096,
+      system: [{ type: "text", text: "System." }],
+      messages: [
+        { role: "user", content: "Read a file" },
+        {
+          role: "assistant",
+          content: [makeToolUseBlock("read_file", { path: "a.txt" }, "call_read")],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_read",
+              content: '{"content":"hello"}',
+            },
+          ],
+        },
+      ],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    expect(capturedMessages?.some((message) => message.role === "assistant")).toBe(true);
+    const assistantMessage = capturedMessages?.find((message) => message.role === "assistant");
+    expect((assistantMessage?.tool_calls as Array<Record<string, unknown>>)[0]).toEqual({
+      id: "call_read",
+      type: "function",
+      function: { name: "read_file", arguments: '{"path":"a.txt"}' },
+    });
+    const toolMessage = capturedMessages?.find((message) => message.role === "tool");
+    expect(toolMessage?.tool_call_id).toBe("call_read");
+    expect(toolMessage?.content).toBe('{"content":"hello"}');
+    expect(response.stop_reason).toBe("end_turn");
+    expect(extractLastText(response)).toBe("Done.");
+  });
+
+  it("accepts object-valued tool call arguments from local servers", async () => {
+    const client = new OpenAIChatCompletionsMessageClient({
+      chat: {
+        completions: {
+          create: async () => ({
+            id: "chatcmpl_object_args",
+            choices: [
+              {
+                finish_reason: "tool_calls",
+                message: {
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: "call_read",
+                      type: "function",
+                      function: {
+                        name: "read_file",
+                        arguments: { path: "src/index.ts" },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          }),
+        },
+      },
+    });
+
+    const response = await client.create({
+      model: "local-model",
+      max_tokens: 4096,
+      system: [{ type: "text", text: "System." }],
+      messages: [{ role: "user", content: "Read src/index.ts" }],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    const toolUse = response.content[0] as Anthropic.ToolUseBlock;
+    expect(toolUse.input).toEqual({ path: "src/index.ts" });
+  });
+
+  it("maps Chat Completions length finish reason to max_tokens", async () => {
+    const client = new OpenAIChatCompletionsMessageClient({
+      chat: {
+        completions: {
+          create: async () => ({
+            id: "chatcmpl_length",
+            choices: [
+              {
+                finish_reason: "length",
+                message: { content: "Partial output", tool_calls: null },
+              },
+            ],
+            usage: { prompt_tokens: 3, completion_tokens: 4096 },
+          }),
+        },
+      },
+    });
+
+    const response = await client.create({
+      model: "local-model",
+      max_tokens: 4096,
+      system: [{ type: "text", text: "System." }],
+      messages: [{ role: "user", content: "Write a long answer" }],
+    } as Anthropic.MessageCreateParamsNonStreaming);
+
+    expect(response.stop_reason).toBe("max_tokens");
+    expect(extractLastText(response)).toBe("Partial output");
   });
 });
 
